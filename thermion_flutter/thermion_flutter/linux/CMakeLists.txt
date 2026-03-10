@@ -21,7 +21,6 @@ set(PLUGIN_NAME "thermion_flutter_plugin")
 add_library(${PLUGIN_NAME} SHARED
   "thermion_flutter_plugin.cc"
   "filament_texture.cc"
-  "filament_pb_texture.cc"
 )
 
 # Apply a standard set of build settings that are configured in the
