@@ -237,6 +237,7 @@ outputDirectory : ${outputDirectory.path}
 
     if (targetOS == OS.linux) {
       flags.add("-Wl,--export-dynamic");
+      flags.add("-Wl,-z,noexecstack");
     }
 
     frameworks = frameworks.expand((f) => ["-framework", f]).toList();
