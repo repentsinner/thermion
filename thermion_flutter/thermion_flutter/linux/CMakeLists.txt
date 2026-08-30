@@ -107,9 +107,14 @@ if(_PKG_CONFIG)
 
       if(_td_rootUri)
         # rootUri may be a file:/// URI (e.g. file:///D:/path on Windows,
-        # file:///home on Linux) or a relative path like "../../thermion_dart".
-        # Strip file:/// (3 slashes) first, then file:// (2 slashes) as fallback.
-        string(REGEX REPLACE "^file:///" "" _td_root "${_td_rootUri}")
+        # file:///root/... on Linux) or a relative path like
+        # "../../thermion_dart". On Windows, strip the scheme and all three
+        # slashes so file:///D:/path yields D:/path. On POSIX, strip only
+        # file:// so the third slash survives as the filesystem root:
+        # stripping it turned file:///root/.pub-cache/... into the RELATIVE
+        # path root/.pub-cache/..., which then resolved under .dart_tool/
+        # and broke header resolution for every hosted (pub.dev) install.
+        string(REGEX REPLACE "^file:///([A-Za-z]:)" "\\1" _td_root "${_td_rootUri}")
         string(REGEX REPLACE "^file://" "" _td_root "${_td_root}")
         if(NOT IS_ABSOLUTE "${_td_root}")
           get_filename_component(_pkg_dir "${_PKG_CONFIG}" DIRECTORY)
