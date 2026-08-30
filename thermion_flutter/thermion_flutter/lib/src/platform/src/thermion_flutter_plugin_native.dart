@@ -130,7 +130,13 @@ class ThermionFlutterPluginImpl extends ThermionFlutterPlugin {
 
     if (Platform.isWindows) return Backend.VULKAN;
     if (Platform.isMacOS || Platform.isIOS) return Backend.METAL;
-    if (Platform.isAndroid || Platform.isLinux) return Backend.OPENGL;
+    // Linux defaults to Vulkan: the OpenGL presentation path shares the
+    // Filament-rendered dma-buf with Flutter zero-copy, so the frame keeps
+    // GL's bottom-left origin and Flutter displays it vertically mirrored.
+    // Vulkan renders top-left and displays correctly. OpenGL remains
+    // available on Linux via NativeOptions(backend: Backend.OPENGL).
+    if (Platform.isLinux) return Backend.VULKAN;
+    if (Platform.isAndroid) return Backend.OPENGL;
     throw UnsupportedError('Unsupported platform: $Platform');
   }
 
