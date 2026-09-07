@@ -7,7 +7,7 @@
 #include <filament/Texture.h>
 #include <filament/TransformManager.h>
 #include <filament/Viewport.h>
-#include <filament/geometry/SurfaceOrientation.h>
+#include <geometry/SurfaceOrientation.h>
 
 #include "Log.hpp"
 #include "scene/GeometrySceneAsset.hpp"
@@ -25,23 +25,28 @@ namespace thermion
         size_t materialInstanceCount,
         RenderableManager::PrimitiveType primitiveType,
         Box boundingBox,
+        TVertexBufferStorageMode vertexBufferStorageMode,
         GeometrySceneAsset *instanceOwner)
         : _engine(engine), 
         _vertexBuffer(vertexBuffer),
         _indexBuffer(indexBuffer),
+        _instanceOwner(instanceOwner),
         _primitiveType(primitiveType),
-        _instanceOwner(instanceOwner)
+        _vertexBufferStorageMode(vertexBufferStorageMode)
     {
         _materialInstances.insert(_materialInstances.begin(), materialInstances, materialInstances + materialInstanceCount);
 
         _entity = utils::EntityManager::get().create();
 
+        auto& tm = engine->getTransformManager();
+        tm.create(_entity);
+
         RenderableManager::Builder builder(1);
         builder.boundingBox(boundingBox)
             .geometry(0, _primitiveType, _vertexBuffer, _indexBuffer)
-            .culling(true)
-            .receiveShadows(true)
-            .castShadows(true);
+            .culling(false)
+            .receiveShadows(false)
+            .castShadows(false);
 
         _boundingBox.min = boundingBox.getMin();
         _boundingBox.max = boundingBox.getMax();
@@ -60,10 +65,17 @@ namespace thermion
         if (ri.isValid()) {
             rm.destroy(_entity);
         }
+
+        auto& tm = _engine->getTransformManager();
+        if (tm.getInstance(_entity).isValid()) {
+            tm.destroy(_entity);
+        }
+
         utils::EntityManager::get().destroy(_entity);
 
-        if (_vertexBuffer && !isInstance())
+        if (_vertexBuffer && !isInstance()) {
             _engine->destroy(_vertexBuffer);
+        }
         if (_indexBuffer && !isInstance())
             _engine->destroy(_indexBuffer);
         
@@ -91,6 +103,7 @@ namespace thermion
             materialInstanceCount,
             _primitiveType,
             filament::Box().set(_boundingBox.min, _boundingBox.max),
+            _vertexBufferStorageMode,
             this);
         auto *raw = instance.get();
         _instances.push_back(std::move(instance));

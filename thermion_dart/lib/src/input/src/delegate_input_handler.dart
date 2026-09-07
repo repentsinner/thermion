@@ -9,6 +9,11 @@ abstract class InputHandlerDelegate {
   Future handle(List<InputEvent> events) async {
     // noop, override to implement
   }
+
+  // Whether this delegate has consumed the most recent batch of events.
+  // When true, [ChainedDelegate] will stop propagating to subsequent delegates.
+  bool get consumesEvents => false;
+
   Future dispose() async {
     // noop, override if you need
   }
@@ -22,25 +27,25 @@ class DelegateInputHandler implements InputHandler {
   final ThermionViewer viewer;
   InputHandlerDelegate? delegate;
 
-  DelegateInputHandler({
-    required this.viewer,
-    this.delegate,
-  });
+  DelegateInputHandler({required this.viewer, this.delegate});
 
-  factory DelegateInputHandler.fixedOrbit(ThermionViewer viewer,
-      {double minimumDistance = 0.1,
-      Vector3? target,
-      InputSensitivityOptions sensitivity = const InputSensitivityOptions(),
-      bool moveOnHover = false}) {
+  factory DelegateInputHandler.fixedOrbit(
+    ThermionViewer viewer, {
+    double minimumDistance = 0.1,
+    Vector3? target,
+    InputSensitivityOptions sensitivity = const InputSensitivityOptions(),
+    bool moveOnHover = false,
+  }) {
     return DelegateInputHandler(
-        viewer: viewer,
-        delegate: OrbitInputHandlerDelegate(
-          viewer.view,
-          moveOnHover: moveOnHover,
-          sensitivity: sensitivity,
-          minZoomDistance: minimumDistance,
-          maxZoomDistance: 1000.0,
-        ));
+      viewer: viewer,
+      delegate: OrbitInputHandlerDelegate(
+        viewer.view,
+        moveOnHover: moveOnHover,
+        sensitivity: sensitivity,
+        minZoomDistance: minimumDistance,
+        maxZoomDistance: 1000.0,
+      ),
+    );
   }
 
   factory DelegateInputHandler.flight(
@@ -48,12 +53,15 @@ class DelegateInputHandler implements InputHandler {
     bool freeLook = false,
     bool moveOnHover = false,
     InputSensitivityOptions sensitivity = const InputSensitivityOptions(),
-  }) =>
-      DelegateInputHandler(
-        viewer: viewer,
-        delegate: FreeFlightInputHandlerDelegateV2(viewer.view,
-            sensitivity: sensitivity, moveOnHover: moveOnHover),
-      );
+  }) => DelegateInputHandler(
+    viewer: viewer,
+    delegate: FreeFlightInputHandlerDelegateV2(
+      viewer.view,
+      viewer.app,
+      sensitivity: sensitivity,
+      moveOnHover: moveOnHover,
+    ),
+  );
 
   @override
   Future dispose() async {

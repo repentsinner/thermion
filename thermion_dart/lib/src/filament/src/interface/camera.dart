@@ -47,8 +47,7 @@ abstract class Camera<T> extends NativeHandle {
   /// @note
   /// With the default parameters, the scene must contain at least one Light of intensity
   /// similar to the sun (e.g.: a 100,000 lux directional light).
-  Future setExposure(
-      double aperture, double shutterSpeed, double sensitivity);
+  Future setExposure(double aperture, double shutterSpeed, double sensitivity);
 
   /// Returns this camera's aperture in f-stops.
   ///
@@ -65,20 +64,25 @@ abstract class Camera<T> extends NativeHandle {
   ///
   Future<double> getSensitivity();
 
-  Future setProjection(Projection projection, double left, double right,
-      double bottom, double top, double near, double far);
-  Future setProjectionFromHorizontalFieldOfView(double degrees,
-      double near, double far, double aspect);
-  Future setProjectionFromVerticalFieldOfView(double degrees,
-      double near, double far, double aspect);
-  Future setProjectionMatrixWithCulling(
-      Matrix4 projectionMatrix, double near, double far);
+  Future setProjection(
+    Projection projection,
+    double left,
+    double right,
+    double bottom,
+    double top,
+    double near,
+    double far,
+  );
+  Future setProjectionFromHorizontalFieldOfView(double degrees, double near, double far, double aspect);
+  Future setProjectionFromVerticalFieldOfView(double degrees, double near, double far, double aspect);
+  Future setProjectionMatrixWithCulling(Matrix4 projectionMatrix, double near, double far);
 
-  Future setLensProjection(
-      {double near = kNear,
-      double far = kFar,
-      double aspect = 1.0,
-      double focalLength = kFocalLength});
+  Future setLensProjection({
+    double near = kNear,
+    double far = kFar,
+    double aspect = 1.0,
+    double focalLength = kFocalLength,
+  });
 
   Future<Matrix4> getViewMatrix();
   Future<Matrix4> getModelMatrix();
@@ -100,30 +104,30 @@ abstract class Camera<T> extends NativeHandle {
   ///
   ///
   Future<double> getNear();
-  
+
   /// Gets the distance to the far plane used for culling.
   ///
   ///
   Future<double> getCullingFar();
-  
+
   ///
   ///
   ///
   Future<double> getFocalLength();
-  
-  /// Get the focus distance for depth-of-field postprocessing effect. 
+
+  /// Get the focus distance for depth-of-field postprocessing effect.
   /// If DoF is not enabled, this does nothing.
   ///
   Future<double> getFocusDistance();
-  
-  /// Set the focus distance for depth-of-field postprocessing effect. 
+
+  /// Set the focus distance for depth-of-field postprocessing effect.
   /// If DoF is not enabled, this does nothing.
   ///
   Future setFocusDistance(double focusDistance);
-  
+
   Future<double> getHorizontalFieldOfView();
   Future<double> getVerticalFieldOfView();
-  
+
   // Returns the view frustum of the camera in camera space.
   Future<Frustum> getFrustum();
 

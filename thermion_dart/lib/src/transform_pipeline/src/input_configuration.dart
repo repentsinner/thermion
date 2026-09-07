@@ -3,7 +3,6 @@ import 'intent_action.dart';
 import 'key_binding.dart';
 import 'mouse_button_binding.dart';
 
-
 /// Configuration for input processing.
 ///
 /// This can be modified at runtime to change keybindings and behavior.
@@ -116,4 +115,3 @@ InputConfiguration createNumpadConfiguration() {
     invertMouseY: false,
   );
 }
-

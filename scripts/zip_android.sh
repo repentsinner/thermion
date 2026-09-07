@@ -2,7 +2,7 @@
 
 # Creates android release/debug zip files from an existing Filament out directory.
 # Usage: ./zip_android.sh <OUT_DIR> <FILAMENT_VERSION> <OUTPUT_DIR>
-# Example: ./zip_android.sh /tmp/out v1.69.1 /tmp
+# Example: ./zip_android.sh /tmp/out v1.74.0 /tmp
 #
 # NOTE: imageio/tinyexr must have been cross-compiled for each Android arch
 # (placed at out/cmake-android-{release,debug}-{arch}/third_party/{imageio,tinyexr}/).
@@ -11,7 +11,7 @@
 if [ $# -lt 3 ]; then
   echo "Usage: $0 <OUT_DIR> <FILAMENT_VERSION> <OUTPUT_DIR>"
   echo "  OUT_DIR: path to Filament's out/ directory"
-  echo "  FILAMENT_VERSION: e.g. v1.69.1"
+  echo "  FILAMENT_VERSION: e.g. v1.74.0"
   echo "  OUTPUT_DIR: where to write the zip files"
   exit 1
 fi
@@ -39,14 +39,17 @@ for BUILD_TYPE in release debug; do
     CMAKE_ARCH=$(abi_to_cmake_arch "$ARCH")
     mkdir -p "$STAGE_DIR/$ARCH"
 
-    # Copy main Filament libraries
+    # Copy main Filament libraries.
+    # NOTE: libzstd.a MUST be included. As of Filament 1.75.0, libfilamat.a
+    # references external ZSTD_* symbols (e.g. ZSTD_getFrameContentSize) that
+    # are no longer bundled inside the Filament archives. Android has no system
+    # libzstd, so omitting libzstd.a leaves those symbols undefined and dlopen
+    # of libthermion_dart.so fails at runtime:
+    #   "cannot locate symbol ZSTD_getFrameContentSize".
     SRC="$OUT_DIR/android-${BUILD_TYPE}/filament/lib/$ARCH"
     if [ -d "$SRC" ]; then
       for lib in "$SRC"/*.a; do
-        case "$(basename "$lib")" in
-          *zstd*) echo "Skipping $(basename "$lib") (bundled in Filament)" ;;
-          *) cp "$lib" "$STAGE_DIR/$ARCH/" ;;
-        esac
+        cp "$lib" "$STAGE_DIR/$ARCH/"
       done
     else
       echo "WARNING: $SRC not found"
@@ -72,6 +75,40 @@ for BUILD_TYPE in release debug; do
 
     echo "$ARCH: $(ls "$STAGE_DIR/$ARCH/" | wc -l) libraries"
   done
+
+  # Copy header files to staging directory (for inclusion in R2 upload zip)
+  echo "Copying header files to staging directory..."
+  if [ "$BUILD_TYPE" = "release" ]; then
+    HEADER_SOURCE="$OUT_DIR/android-release/filament/include"
+  else
+    HEADER_SOURCE="$OUT_DIR/android-debug/filament/include"
+  fi
+
+  if [ -d "$HEADER_SOURCE" ]; then
+    mkdir -p "$STAGE_DIR/include"
+    cp -R "$HEADER_SOURCE"/* "$STAGE_DIR/include/" || {
+      echo "Warning: Failed to copy headers to staging directory"
+    }
+  fi
+
+  # Copy imageio headers
+  if [ -d "$OUT_DIR/../libs/imageio/include" ]; then
+    mkdir -p "$STAGE_DIR/include/imageio"
+    cp -R "$OUT_DIR/../libs/imageio/include"/* "$STAGE_DIR/include/imageio/" 2>/dev/null || true
+  fi
+
+  # Copy stb_image.h
+  if [ -f "$OUT_DIR/../third_party/stb/stb_image.h" ]; then
+    mkdir -p "$STAGE_DIR/include/third_party/stb"
+    cp "$OUT_DIR/../third_party/stb/stb_image.h" "$STAGE_DIR/include/third_party/stb/" 2>/dev/null || true
+  fi
+
+  # Copy uberarchive.h for release/debug
+  UBERARCHIVE="$HEADER_SOURCE/gltfio/materials/uberarchive.h"
+  if [ -f "$UBERARCHIVE" ]; then
+    mkdir -p "$STAGE_DIR/include/$BUILD_TYPE/gltfio/materials"
+    cp "$UBERARCHIVE" "$STAGE_DIR/include/$BUILD_TYPE/gltfio/materials/" 2>/dev/null || true
+  fi
 
   ZIP_FILE="$OUTPUT_DIR/filament-${FILAMENT_VERSION}-android-${BUILD_TYPE}.zip"
   cd "$STAGE_DIR"

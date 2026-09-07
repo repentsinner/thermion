@@ -32,7 +32,11 @@ namespace thermion
     extern "C"
     {
         using namespace filament;
-        
+
+        // Defined in ThermionDartRenderThreadApi.cpp; records which render
+        // thread owns an engine-scoped object.
+        void RenderThread_registerOwnerFromOwner(void *owner, void *knownOwner);
+
 #endif
 
 
@@ -55,12 +59,26 @@ EMSCRIPTEN_KEEPALIVE TGltfAssetLoader *GltfAssetLoader_create(TEngine *tEngine, 
     return reinterpret_cast<TGltfAssetLoader *>(assetLoader);
 }
 
+EMSCRIPTEN_KEEPALIVE void GltfAssetLoader_destroy(TGltfAssetLoader *tAssetLoader) {
+    auto *loader = reinterpret_cast<gltfio::AssetLoader *>(tAssetLoader);
+    // The MaterialProvider is the caller's responsibility per Filament's
+    // contract (see AssetLoader.h:68-70, example at 145-149). We typically
+    // create the ubershader provider internally in GltfAssetLoader_create
+    // (when tMaterialProvider was null) and don't expose a separate handle,
+    // so retrieve it here and tear it down in the documented order:
+    // destroyMaterials -> AssetLoader::destroy -> delete provider.
+    auto *provider = &loader->getMaterialProvider();
+    provider->destroyMaterials();
+    gltfio::AssetLoader::destroy(&loader);
+    delete provider;
+}
+
 EMSCRIPTEN_KEEPALIVE TFilamentAsset *GltfAssetLoader_load(
     TEngine *tEngine,
     TGltfAssetLoader *tAssetLoader,
     const uint8_t *data,
     size_t length,
-    uint8_t numInstances)
+    uint32_t numInstances)
 {
     auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
     auto *assetLoader = reinterpret_cast<gltfio::AssetLoader *>(tAssetLoader);
@@ -113,6 +131,9 @@ EMSCRIPTEN_KEEPALIVE TMaterialInstance *GltfAssetLoader_getMaterialInstance(TRen
 EMSCRIPTEN_KEEPALIVE TMaterialProvider *GltfAssetLoader_getMaterialProvider(TGltfAssetLoader *tAssetLoader) {
     auto *assetLoader = reinterpret_cast<gltfio::AssetLoader *>(tAssetLoader);
     auto &materialProvider = assetLoader->getMaterialProvider();
+    // The provider is engine-scoped; record its render thread so
+    // MaterialProvider_createMaterialInstanceRenderThread can dispatch.
+    RenderThread_registerOwnerFromOwner(&materialProvider, tAssetLoader);
     return reinterpret_cast<TMaterialProvider *>(&materialProvider);
 }
 

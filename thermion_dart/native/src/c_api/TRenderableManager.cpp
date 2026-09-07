@@ -1,5 +1,6 @@
 #include <filament/MaterialInstance.h>
 #include <filament/RenderableManager.h>
+#include <math/mat4.h>
 #include <utils/Entity.h>
 
 #include "Log.hpp"
@@ -44,6 +45,23 @@ namespace thermion
             }
             auto materialInstance = renderableManager->getMaterialInstanceAt(renderableInstance, primitiveIndex);
             return reinterpret_cast<TMaterialInstance*>(materialInstance);
+        }
+
+        // Non-indexed runtime geometry swap (Filament's attribute-less/
+        // procedural rendering path): no IndexBuffer, [offset, count) select a
+        // vertex range of an attribute-less VertexBuffer.
+        EMSCRIPTEN_KEEPALIVE bool RenderableManager_setGeometryAtNonIndexed(TRenderableManager *tRenderableManager, EntityId entityId, int primitiveIndex, uint8_t type, TVertexBuffer *tVertices, size_t offset, size_t count) {
+            auto *renderableManager = reinterpret_cast<filament::RenderableManager *>(tRenderableManager);
+            const auto &entity = utils::Entity::import(entityId);
+            auto renderableInstance = renderableManager->getInstance(entity);
+            if(!renderableInstance.isValid()) {
+                Log("Error: invalid renderable");
+                return false;
+            }
+            auto *vertexBuffer = reinterpret_cast<filament::VertexBuffer*>(tVertices);
+            auto primitiveType = static_cast<filament::RenderableManager::PrimitiveType>(type);
+            renderableManager->setGeometryAt(renderableInstance, primitiveIndex, primitiveType, vertexBuffer, offset, count);
+            return true;
         }
 
         EMSCRIPTEN_KEEPALIVE bool RenderableManager_isRenderable(TRenderableManager *tRenderableManager, EntityId entityId) {
@@ -356,6 +374,32 @@ namespace thermion
             return renderableManager->getMorphTargetCount(renderableInstance);
         }
 
+        // Skinning / bone transforms
+        EMSCRIPTEN_KEEPALIVE void RenderableManager_setBonesFromMat4(TRenderableManager *tRenderableManager, EntityId entityId, const float *transforms, size_t boneCount, size_t offset) {
+            auto *renderableManager = reinterpret_cast<filament::RenderableManager *>(tRenderableManager);
+            const auto &entity = utils::Entity::import(entityId);
+            auto renderableInstance = renderableManager->getInstance(entity);
+            if (!renderableInstance.isValid()) {
+                Log("Error: invalid renderable");
+                return;
+            }
+            auto *mat4Transforms = reinterpret_cast<const filament::math::mat4f *>(transforms);
+            renderableManager->setBones(renderableInstance, mat4Transforms, boneCount, offset);
+        }
+
+        EMSCRIPTEN_KEEPALIVE void RenderableManager_setBonesFromBone(TRenderableManager *tRenderableManager, EntityId entityId, const float *bones, size_t boneCount, size_t offset) {
+            auto *renderableManager = reinterpret_cast<filament::RenderableManager *>(tRenderableManager);
+            const auto &entity = utils::Entity::import(entityId);
+            auto renderableInstance = renderableManager->getInstance(entity);
+            if (!renderableInstance.isValid()) {
+                Log("Error: invalid renderable");
+                return;
+            }
+            // Cast float* to RenderableManager::Bone* (Bone is 8 floats: quat4 + translation3 + reserved1)
+            auto *boneTransforms = reinterpret_cast<const filament::RenderableManager::Bone*>(bones);
+            renderableManager->setBones(renderableInstance, boneTransforms, boneCount, offset);
+        }
+
         // ============================================================================
         // RenderableBuilder
         // ============================================================================
@@ -390,6 +434,18 @@ namespace thermion
             auto *indexBuffer = reinterpret_cast<filament::IndexBuffer*>(tIndices);
             auto primitiveType = static_cast<filament::RenderableManager::PrimitiveType>(type);
             builder->geometry(primitiveIndex, primitiveType, vertexBuffer, indexBuffer, offset, count);
+        }
+
+        // Non-indexed geometry overload (Filament's attribute-less/procedural
+        // rendering path): no IndexBuffer is supplied, and [offset, count)
+        // select a vertex range. The VertexBuffer must have been built with
+        // bufferCount(0) and no declared attributes; positions are computed
+        // from getVertexIndex() in the material's vertex block.
+        EMSCRIPTEN_KEEPALIVE void RenderableBuilder_geometryNonIndexed(TRenderableBuilder *tBuilder, size_t primitiveIndex, uint8_t type, TVertexBuffer *tVertices, size_t offset, size_t count) {
+            auto *builder = reinterpret_cast<filament::RenderableManager::Builder*>(tBuilder);
+            auto *vertexBuffer = reinterpret_cast<filament::VertexBuffer*>(tVertices);
+            auto primitiveType = static_cast<filament::RenderableManager::PrimitiveType>(type);
+            builder->geometry(primitiveIndex, primitiveType, vertexBuffer, offset, count);
         }
 
         EMSCRIPTEN_KEEPALIVE void RenderableBuilder_priority(TRenderableBuilder *tBuilder, uint8_t priority) {
@@ -450,6 +506,29 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE void RenderableBuilder_instances(TRenderableBuilder *tBuilder, size_t instanceCount) {
             auto *builder = reinterpret_cast<filament::RenderableManager::Builder*>(tBuilder);
             builder->instances(instanceCount);
+        }
+
+        EMSCRIPTEN_KEEPALIVE void RenderableBuilder_skinningFromMat4(TRenderableBuilder *tBuilder, size_t boneCount, const float *transforms) {
+            auto *builder = reinterpret_cast<filament::RenderableManager::Builder*>(tBuilder);
+            auto *mat4Transforms = reinterpret_cast<const filament::math::mat4f*>(transforms);
+            builder->skinning(boneCount, mat4Transforms);
+        }
+
+        EMSCRIPTEN_KEEPALIVE void RenderableBuilder_skinningFromBone(TRenderableBuilder *tBuilder, size_t boneCount, const float *bones) {
+            auto *builder = reinterpret_cast<filament::RenderableManager::Builder*>(tBuilder);
+            auto *boneTransforms = reinterpret_cast<const filament::RenderableManager::Bone*>(bones);
+            builder->skinning(boneCount, boneTransforms);
+        }
+
+        EMSCRIPTEN_KEEPALIVE void RenderableBuilder_enableSkinningBuffers(TRenderableBuilder *tBuilder, bool enabled) {
+            auto *builder = reinterpret_cast<filament::RenderableManager::Builder*>(tBuilder);
+            builder->enableSkinningBuffers(enabled);
+        }
+
+        EMSCRIPTEN_KEEPALIVE void RenderableBuilder_boneIndicesAndWeights(TRenderableBuilder *tBuilder, size_t primitiveIndex, const float *indicesAndWeights, size_t count, size_t bonesPerVertex) {
+            auto *builder = reinterpret_cast<filament::RenderableManager::Builder*>(tBuilder);
+            auto *float2Data = reinterpret_cast<const filament::math::float2*>(indicesAndWeights);
+            builder->boneIndicesAndWeights(primitiveIndex, float2Data, count, bonesPerVertex);
         }
 
         EMSCRIPTEN_KEEPALIVE int RenderableBuilder_build(TRenderableBuilder *tBuilder, TEngine *tEngine, EntityId entityId) {

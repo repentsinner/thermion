@@ -9,13 +9,14 @@ extern "C"
 #endif
 
 EMSCRIPTEN_KEEPALIVE TGltfAssetLoader *GltfAssetLoader_create(TEngine *tEngine, TMaterialProvider *tMaterialProvider, TNameComponentManager *tNameComponentManager);
+EMSCRIPTEN_KEEPALIVE void GltfAssetLoader_destroy(TGltfAssetLoader *tAssetLoader);
 
 EMSCRIPTEN_KEEPALIVE TFilamentAsset *GltfAssetLoader_load(
     TEngine *tEngine,
     TGltfAssetLoader *tAssetLoader,
     const uint8_t *data,
     size_t length,
-    uint8_t numInstances
+    uint32_t numInstances
 );
 EMSCRIPTEN_KEEPALIVE TMaterialInstance *GltfAssetLoader_getMaterialInstance(TRenderableManager *tRenderableManager, TFilamentAsset *tAsset);
 EMSCRIPTEN_KEEPALIVE TMaterialProvider *GltfAssetLoader_getMaterialProvider(TGltfAssetLoader *tAssetLoader);

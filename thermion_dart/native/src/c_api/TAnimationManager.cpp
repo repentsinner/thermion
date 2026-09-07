@@ -18,6 +18,10 @@ extern "C"
         return reinterpret_cast<TAnimationManager *>(animationManager);
     }
 
+    EMSCRIPTEN_KEEPALIVE void AnimationManager_destroy(TAnimationManager *tAnimationManager) {
+        delete reinterpret_cast<AnimationManager *>(tAnimationManager);
+    }
+
     EMSCRIPTEN_KEEPALIVE void AnimationManager_update(TAnimationManager *tAnimationManager, uint64_t frameTimeInNanos) {
         auto animationManager = reinterpret_cast<AnimationManager *>(tAnimationManager);
         animationManager->update(frameTimeInNanos);
@@ -196,13 +200,14 @@ extern "C"
         float frameLengthInMs,
         float fadeOutInSecs,
         float fadeInInSecs,
-        float maxDelta)
+        float maxDelta,
+        bool loop)
     {
         auto sceneAsset = reinterpret_cast<SceneAsset *>(tSceneAsset);
         if(sceneAsset->getType() != SceneAsset::SceneAssetType::Gltf) {
             return false;
         }
-        
+
         auto animationManager = reinterpret_cast<AnimationManager *>(tAnimationManager);
         GltfSceneAssetInstance *instance;
 
@@ -213,29 +218,9 @@ extern "C"
             instance = reinterpret_cast<GltfSceneAssetInstance *>(sceneAsset->getInstanceAt(0));
         }
         animationManager->addBoneAnimationComponent(instance);
-        animationManager->addBoneAnimation(instance, skinIndex, boneIndex, frameData, numFrames, frameLengthInMs, fadeOutInSecs, fadeInInSecs, maxDelta);
+        animationManager->addBoneAnimation(instance, skinIndex, boneIndex, frameData, numFrames, frameLengthInMs, fadeOutInSecs, fadeInInSecs, maxDelta, loop);
         return true;
-        
-    }
 
-    EMSCRIPTEN_KEEPALIVE EntityId AnimationManager_getBone(
-        TAnimationManager *tAnimationManager,
-        TSceneAsset *sceneAsset,
-        int skinIndex,
-        int boneIndex)
-    {
-        auto *animationManager = reinterpret_cast<AnimationManager *>(tAnimationManager);
-        auto asset = reinterpret_cast<SceneAsset *>(sceneAsset);
-        if (asset->getType() == SceneAsset::SceneAssetType::Gltf && asset->isInstance())
-        {
-            auto entities = animationManager->getBoneEntities(reinterpret_cast<GltfSceneAssetInstance *>(asset), skinIndex);
-            if (boneIndex < entities.size())
-            {
-                return utils::Entity::smuggle(entities[boneIndex]);
-            }
-        }
-
-        return 0;
     }
 
     EMSCRIPTEN_KEEPALIVE void AnimationManager_getRestLocalTransforms(
@@ -351,18 +336,18 @@ extern "C"
         return true;
     }
 
-    EMSCRIPTEN_KEEPALIVE bool AnimationManager_setGltfAnimationFrame(
+    EMSCRIPTEN_KEEPALIVE bool AnimationManager_setGltfAnimationTime(
         TAnimationManager *tAnimationManager,
         TSceneAsset *tSceneAsset,
         int animationIndex,
-        int frame)
+        float timeInSeconds)
     {
         auto *animationManager = reinterpret_cast<AnimationManager *>(tAnimationManager);
         auto sceneAsset = reinterpret_cast<SceneAsset *>(tSceneAsset);
         if (sceneAsset->getType() != SceneAsset::SceneAssetType::Gltf) {
             return false;
         }
-        
+
         GltfSceneAssetInstance *instance;
 
         if (sceneAsset->isInstance())
@@ -371,8 +356,8 @@ extern "C"
         } else {
             instance = reinterpret_cast<GltfSceneAssetInstance *>(sceneAsset->getInstanceAt(0));
         }
-        
-        animationManager->setGltfAnimationFrame(instance, animationIndex, frame);
+
+        animationManager->setGltfAnimationTime(instance, animationIndex, timeInSeconds);
 
         return true;
 
@@ -448,27 +433,6 @@ extern "C"
         auto names = animationManager->getGltfAnimationNames(instance);
         std::string name = names[index];
         strcpy(outPtr, name.c_str());
-    }
-
-    EMSCRIPTEN_KEEPALIVE int AnimationManager_getBoneCount(
-        TAnimationManager *tAnimationManager,
-        TSceneAsset *sceneAsset,
-        int skinIndex)
-    {
-        auto instance = ((GltfSceneAssetInstance *)sceneAsset);
-        auto entities = ((AnimationManager *)tAnimationManager)->getBoneEntities(instance, skinIndex);
-        return (int)entities.size();
-    }
-
-    EMSCRIPTEN_KEEPALIVE void AnimationManager_getBoneNames(
-        TAnimationManager *tAnimationManager,
-        TSceneAsset *sceneAsset,
-        const char **out,
-        int skinIndex)
-    {
-        auto instance = ((GltfSceneAssetInstance *)sceneAsset);
-        auto entities = ((AnimationManager *)tAnimationManager)->getBoneEntities(instance, skinIndex);
-        
     }
 
     EMSCRIPTEN_KEEPALIVE bool AnimationManager_updateBoneMatrices(

@@ -1,10 +1,7 @@
 import 'package:thermion_dart/src/filament/src/interface/native_handle.dart';
 import 'package:thermion_dart/thermion_dart.dart';
 
-
-
 abstract class LightManager<T> extends NativeHandle<T> {
-  
   /// Creates a new light entity with the specified type.
   /// The light must be added to a scene before it is visible.
   ThermionEntity createLight(LightType type);
@@ -125,13 +122,13 @@ abstract class LightManager<T> extends NativeHandle<T> {
   // ============================================================================
 
   /// Enables or disables shadow casting for the specified light.
-  void setShadowCaster(ThermionEntity light, bool enabled);
+  Future<void> setShadowCaster(ThermionEntity light, bool enabled);
 
   /// Returns whether the light casts shadows.
   bool isShadowCaster(ThermionEntity light);
 
   /// Sets the shadow options for the light.
-  void setShadowOptions(ThermionEntity light, ShadowOptions options);
+  Future<void> setShadowOptions(ThermionEntity light, ShadowOptions options);
 
   /// Returns the shadow options for the light.
   ShadowOptions getShadowOptions(ThermionEntity light);

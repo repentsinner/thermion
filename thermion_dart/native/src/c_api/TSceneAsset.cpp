@@ -7,6 +7,7 @@
 
 #include "c_api/TGltfAssetLoader.h"
 #include "c_api/TSceneAsset.h"
+#include "Log.hpp"
 
 #include "scene/GeometrySceneAsset.hpp"
 #include "scene/GltfSceneAsset.hpp"
@@ -27,6 +28,7 @@ extern "C"
         TMaterialInstance **materialInstances,
         int materialInstanceCount,
         TPrimitiveType tPrimitiveType,
+        TVertexBufferStorageMode vertexBufferStorageMode,
         Aabb3 boundingBox
     ) {
         auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
@@ -59,6 +61,7 @@ extern "C"
             materialInstanceCount,
             primitiveType,
             box,
+            vertexBufferStorageMode,
             nullptr  // instanceOwner - this is not an instance
         );
 
@@ -69,21 +72,36 @@ extern "C"
         TEngine *tEngine,
         TGltfAssetLoader *tAssetLoader,
         TNameComponentManager *tNameComponentManager,
-        TFilamentAsset *tFilamentAsset
+        TFilamentAsset *tFilamentAsset,
+        uint32_t requiredGeometryCapabilities
     ) {
         auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
         auto *nameComponentManager = reinterpret_cast<utils::NameComponentManager *>(tNameComponentManager);
         auto *filamentAsset = reinterpret_cast<filament::gltfio::FilamentAsset *>(tFilamentAsset);
 
         auto *assetLoader = reinterpret_cast<filament::gltfio::AssetLoader *>(tAssetLoader);
+        if (!GltfSceneAsset::supportsRequiredGeometryCapabilities(requiredGeometryCapabilities)) {
+            Log("Unsupported or incompatible required geometry capabilities: 0x%x",
+                requiredGeometryCapabilities);
+            return nullptr;
+        }
         auto *sceneAsset = new GltfSceneAsset(
             filamentAsset,
             assetLoader,
             engine,
-            nameComponentManager
+            nameComponentManager,
+            requiredGeometryCapabilities
         );
 
-        return reinterpret_cast<TSceneAsset *>(sceneAsset);        
+        if ((sceneAsset->getGeometryCapabilities() & requiredGeometryCapabilities) !=
+            requiredGeometryCapabilities) {
+            Log("Failed to provide required geometry capabilities: requested 0x%x, provided 0x%x",
+                requiredGeometryCapabilities, sceneAsset->getGeometryCapabilities());
+            delete sceneAsset;
+            return nullptr;
+        }
+
+        return reinterpret_cast<TSceneAsset *>(sceneAsset);
     }
     
     EMSCRIPTEN_KEEPALIVE TFilamentAsset *SceneAsset_getFilamentAsset(TSceneAsset *tSceneAsset) {
@@ -99,7 +117,12 @@ extern "C"
         return reinterpret_cast<TFilamentAsset *>(filamentAsset);
     }
 
-    EMSCRIPTEN_KEEPALIVE void SceneAsset_destroy(TSceneAsset *tSceneAsset) { 
+    EMSCRIPTEN_KEEPALIVE TSceneAssetType SceneAsset_getType(TSceneAsset *tSceneAsset) {
+        auto *asset = reinterpret_cast<SceneAsset *>(tSceneAsset);
+        return static_cast<TSceneAssetType>(asset->getType());
+    }
+
+    EMSCRIPTEN_KEEPALIVE void SceneAsset_destroy(TSceneAsset *tSceneAsset) {
         auto *asset = reinterpret_cast<SceneAsset*>(tSceneAsset);
         if(asset->isInstance()) {
             TRACE("Destroyed instance");
@@ -220,6 +243,14 @@ extern "C"
         return Aabb3{box.center().x, box.center().y, box.center().z, box.extent().x, box.extent().y, box.extent().z};
     }
 
+    EMSCRIPTEN_KEEPALIVE uint32_t SceneAsset_getGeometryCapabilities(TSceneAsset *tSceneAsset) {
+        return reinterpret_cast<SceneAsset*>(tSceneAsset)->getGeometryCapabilities();
+    }
+
+    EMSCRIPTEN_KEEPALIVE bool SceneAsset_supportsFlatShading(TSceneAsset *tSceneAsset) {
+        return reinterpret_cast<SceneAsset*>(tSceneAsset)->supportsFlatShading();
+    }
+
     EMSCRIPTEN_KEEPALIVE TVertexBuffer *SceneAsset_getVertexBuffer(TSceneAsset *tSceneAsset, int primitiveIndex) {
         auto *asset = reinterpret_cast<SceneAsset*>(tSceneAsset);
         if (asset->getType() == SceneAsset::SceneAssetType::Geometry) {
@@ -227,7 +258,23 @@ extern "C"
             auto *vertexBuffer = geometrySceneAsset->getVertexBuffer();
             return reinterpret_cast<TVertexBuffer *>(vertexBuffer);
         }
+        if (asset->getType() == SceneAsset::SceneAssetType::Gltf) {
+            auto gltfSceneAsset = reinterpret_cast<GltfSceneAsset *>(
+                asset->isInstance() ? asset->getInstanceOwner() : asset);
+            auto *vertexBuffer = gltfSceneAsset->getPreservedVertexBuffer(primitiveIndex);
+            return reinterpret_cast<TVertexBuffer *>(vertexBuffer);
+        }
         return nullptr;
+    }
+
+    EMSCRIPTEN_KEEPALIVE TVertexBufferStorageMode SceneAsset_getVertexBufferStorageMode(
+        TSceneAsset *tSceneAsset,
+        int primitiveIndex) {
+        if (primitiveIndex < 0) {
+            return VERTEX_BUFFER_STORAGE_MODE_UNKNOWN;
+        }
+        return reinterpret_cast<SceneAsset*>(tSceneAsset)->getVertexBufferStorageMode(
+            static_cast<size_t>(primitiveIndex));
     }
 
     EMSCRIPTEN_KEEPALIVE TIndexBuffer *SceneAsset_getIndexBuffer(TSceneAsset *tSceneAsset, int primitiveIndex) {
@@ -237,11 +284,71 @@ extern "C"
             auto *indexBuffer = geometrySceneAsset->getIndexBuffer();
             return reinterpret_cast<TIndexBuffer *>(indexBuffer);
         }
+        if (asset->getType() == SceneAsset::SceneAssetType::Gltf) {
+            auto gltfSceneAsset = reinterpret_cast<GltfSceneAsset *>(
+                asset->isInstance() ? asset->getInstanceOwner() : asset);
+            auto *indexBuffer = gltfSceneAsset->getPreservedIndexBuffer(primitiveIndex);
+            return reinterpret_cast<TIndexBuffer *>(indexBuffer);
+        }
         return nullptr;
     }
 
+    EMSCRIPTEN_KEEPALIVE int SceneAsset_getPrimitiveOffsetForEntity(TSceneAsset *tSceneAsset, EntityId entity) {
+        auto *asset = reinterpret_cast<SceneAsset*>(tSceneAsset);
+        if (asset->getType() != SceneAsset::SceneAssetType::Gltf) {
+            return -1;
+        }
+        auto gltfSceneAsset = reinterpret_cast<GltfSceneAsset *>(
+            asset->isInstance() ? asset->getInstanceOwner() : asset);
+        // Convert EntityId to utils::Entity for the internal method
+        return gltfSceneAsset->getPrimitiveOffsetForEntity(utils::Entity::import(entity));
+    }
+
+
+    EMSCRIPTEN_KEEPALIVE void SceneAsset_releaseSourceData(TSceneAsset *tSceneAsset) {
+        auto *asset = reinterpret_cast<SceneAsset*>(tSceneAsset);
+        if (asset->getType() != SceneAsset::SceneAssetType::Gltf) {
+            Log("releaseSourceData only supported on glTF assets");
+            return;
+        }
+        if (asset->isInstance()) {
+            Log("releaseSourceData must be called on the owning asset, not an instance");
+            return;
+        }
+        auto *gltfAsset = reinterpret_cast<GltfSceneAsset*>(tSceneAsset);
+        gltfAsset->releaseSourceData();
+    }
+
+    EMSCRIPTEN_KEEPALIVE void SceneAsset_setFlatShading(TSceneAsset *tSceneAsset, bool flatShading) {
+        auto *asset = reinterpret_cast<SceneAsset*>(tSceneAsset);
+        if (asset->getType() != SceneAsset::SceneAssetType::Gltf) {
+            Log("setFlatShading only supported on glTF assets");
+            return;
+        }
+        auto *gltfAsset = reinterpret_cast<GltfSceneAsset*>(
+            asset->isInstance() ? asset->getInstanceOwner() : asset);
+        gltfAsset->setFlatShading(flatShading);
+    }
+
+    EMSCRIPTEN_KEEPALIVE void SceneAsset_getBones(TSceneAsset *tSceneAsset, size_t skinIndex, EntityId *out) {
+        auto *asset = reinterpret_cast<SceneAsset*>(tSceneAsset);
+        auto *bones = asset->getBones(skinIndex);
+        for(int i = 0; i < asset->getBoneCount(skinIndex); i++) {
+            out[i] = utils::Entity::smuggle(bones[i]);
+        }
+    }
+
+
+    EMSCRIPTEN_KEEPALIVE size_t SceneAsset_getBoneCount(TSceneAsset *tSceneAsset, size_t skinIndex) {
+        auto *asset = reinterpret_cast<SceneAsset*>(tSceneAsset);
+        return asset->getBoneCount(skinIndex);
+    }
+
+    EMSCRIPTEN_KEEPALIVE const char *SceneAsset_getBoneName(TSceneAsset *tSceneAsset, size_t skinIndex, size_t boneIndex) {
+        auto *asset = reinterpret_cast<SceneAsset*>(tSceneAsset);
+        return asset->getBoneName(skinIndex, boneIndex);
+    }
 
 #ifdef __cplusplus
 }
 #endif
-

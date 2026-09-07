@@ -64,6 +64,12 @@ namespace thermion
             view->setFrustumCullingEnabled(enabled);
         }
 
+        EMSCRIPTEN_KEEPALIVE int32_t View_getVisibleRenderableCount(TView *tView)
+        {
+            auto view = reinterpret_cast<View *>(tView);
+            return view->getVisibleRenderableCount();
+        }
+
         EMSCRIPTEN_KEEPALIVE void View_setPostProcessing(TView *tView, bool enabled)
         {
             auto view = reinterpret_cast<View *>(tView);
@@ -95,6 +101,8 @@ namespace thermion
             SoftShadowOptions opts;
             opts.penumbraRatioScale = options.penumbraRatioScale;
             opts.penumbraScale = options.penumbraScale;
+            opts.maxPenumbraRatio = options.maxPenumbraRatio;
+            opts.maxSearchRadius = options.maxSearchRadius;
             view->setSoftShadowOptions(opts);
         }
 
@@ -105,6 +113,8 @@ namespace thermion
             TSoftShadowOptions tOptions;
             tOptions.penumbraRatioScale = options.penumbraRatioScale;
             tOptions.penumbraScale = options.penumbraScale;
+            tOptions.maxPenumbraRatio = options.maxPenumbraRatio;
+            tOptions.maxSearchRadius = options.maxSearchRadius;
             return tOptions;
         }
 
@@ -138,13 +148,11 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE void View_setBloom(TView *tView, bool enabled, float strength)
         {
             auto view = reinterpret_cast<View *>(tView);
-#ifndef __EMSCRIPTEN__
             decltype(view->getBloomOptions()) opts;
             opts.enabled = enabled;
             opts.strength = strength;
             TRACE("Setting bloom options {.enabled = %d, strength = %f}", enabled, strength);
             view->setBloomOptions(opts);
-#endif
         }
 
         EMSCRIPTEN_KEEPALIVE void View_setColorGrading(TView *tView, TColorGrading *tColorGrading)
@@ -227,17 +235,6 @@ namespace thermion
             TRACE("Destroyed ToneMapper");
         }
 
-        EMSCRIPTEN_KEEPALIVE TColorGrading *ColorGrading_create(TEngine *tEngine, TToneMapper *toneMapper)
-        {
-            auto engine = reinterpret_cast<Engine *>(tEngine);
-            auto tm = reinterpret_cast<ToneMapper *>(toneMapper);
-
-            TRACE("Creating ColorGrading with ToneMapper");
-            auto colorGrading = ColorGrading::Builder().toneMapper(tm).build(*engine);
-
-            return reinterpret_cast<TColorGrading *>(colorGrading);
-        }
-
         // ============================================================================
         // ColorGrading Builder API
         // ============================================================================
@@ -280,6 +277,18 @@ namespace thermion
         {
             auto builder = reinterpret_cast<ColorGrading::Builder*>(tBuilder);
             builder->quality(static_cast<ColorGrading::QualityLevel>(level));
+        }
+
+        EMSCRIPTEN_KEEPALIVE void ColorGradingBuilder_format(TColorGradingBuilder* tBuilder, TLutFormat format)
+        {
+            auto builder = reinterpret_cast<ColorGrading::Builder*>(tBuilder);
+            builder->format(static_cast<ColorGrading::LutFormat>(format));
+        }
+
+        EMSCRIPTEN_KEEPALIVE void ColorGradingBuilder_dimensions(TColorGradingBuilder* tBuilder, uint8_t dim)
+        {
+            auto builder = reinterpret_cast<ColorGrading::Builder*>(tBuilder);
+            builder->dimensions(dim);
         }
 
         EMSCRIPTEN_KEEPALIVE void ColorGradingBuilder_toneMapper(TColorGradingBuilder* tBuilder, TToneMapper* toneMapper)
@@ -571,6 +580,7 @@ namespace thermion
             auto view = reinterpret_cast<View *>(tView);
             AmbientOcclusionOptions aoOptions;
 
+            aoOptions.aoType = static_cast<AmbientOcclusionOptions::AmbientOcclusionType>(options.aoType);
             aoOptions.radius = options.radius;
             aoOptions.power = options.power;
             aoOptions.bias = options.bias;
@@ -596,6 +606,14 @@ namespace thermion
             aoOptions.ssct.rayCount = options.ssct.rayCount;
             aoOptions.ssct.enabled = options.ssct.enabled;
 
+            // Copy GTAO options
+            aoOptions.gtao.sampleSliceCount = options.gtao.sampleSliceCount;
+            aoOptions.gtao.sampleStepsPerSlice = options.gtao.sampleStepsPerSlice;
+            aoOptions.gtao.thicknessHeuristic = options.gtao.thicknessHeuristic;
+            aoOptions.gtao.useVisibilityBitmasks = options.gtao.useVisibilityBitmasks;
+            aoOptions.gtao.constThickness = options.gtao.constThickness;
+            aoOptions.gtao.linearThickness = options.gtao.linearThickness;
+
             view->setAmbientOcclusionOptions(aoOptions);
         }
 
@@ -605,6 +623,7 @@ namespace thermion
             auto options = view->getAmbientOcclusionOptions();
 
             TAmbientOcclusionOptions tOptions;
+            tOptions.aoType = static_cast<TAmbientOcclusionType>(options.aoType);
             tOptions.radius = options.radius;
             tOptions.power = options.power;
             tOptions.bias = options.bias;
@@ -631,6 +650,14 @@ namespace thermion
             tOptions.ssct.sampleCount = options.ssct.sampleCount;
             tOptions.ssct.rayCount = options.ssct.rayCount;
             tOptions.ssct.enabled = options.ssct.enabled;
+
+            // Copy GTAO options
+            tOptions.gtao.sampleSliceCount = options.gtao.sampleSliceCount;
+            tOptions.gtao.sampleStepsPerSlice = options.gtao.sampleStepsPerSlice;
+            tOptions.gtao.thicknessHeuristic = options.gtao.thicknessHeuristic;
+            tOptions.gtao.useVisibilityBitmasks = options.gtao.useVisibilityBitmasks;
+            tOptions.gtao.constThickness = options.gtao.constThickness;
+            tOptions.gtao.linearThickness = options.gtao.linearThickness;
 
             return tOptions;
         }

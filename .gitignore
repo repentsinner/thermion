@@ -7,11 +7,10 @@
 **/*/build
 !thermion_dart/native/web/
 thermion_dart/native/web/build/
-!thermion_dart/native/web/build/**/thermion_dart.js
-!thermion_dart/native/web/build/**/thermion_dart.wasm
 thermion_dart/native/web/build/**
 **/*/pubspec.lock
 pubspec_overrides.yaml
+!thermion_flutter/thermion_flutter/pubspec_overrides.yaml
 /pubspec.lock
 *.iml
 **/*/*.filamat
@@ -20,3 +19,4 @@ pubspec_overrides.yaml
 .wrangler
 node_modules
 .claude
+.tickets

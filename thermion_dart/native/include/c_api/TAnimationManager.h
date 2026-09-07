@@ -9,7 +9,8 @@ extern "C"
 #endif
 	
 	EMSCRIPTEN_KEEPALIVE TAnimationManager *AnimationManager_create(TEngine *tEngine);
-	
+	EMSCRIPTEN_KEEPALIVE void AnimationManager_destroy(TAnimationManager *tAnimationManager);
+
 	EMSCRIPTEN_KEEPALIVE void AnimationManager_update(TAnimationManager *tAnimationManager, uint64_t frameTimeInNanos);
 
 	EMSCRIPTEN_KEEPALIVE bool AnimationManager_addGltfAnimationComponent(TAnimationManager *tAnimationManager, TSceneAsset *tSceneAsset);
@@ -42,13 +43,8 @@ extern "C"
 		float frameLengthInMs,
 		float fadeOutInSecs,
 		float fadeInInSecs,
-		float maxDelta);
-
-	EMSCRIPTEN_KEEPALIVE EntityId AnimationManager_getBone(
-		TAnimationManager *tAnimationManager,
-		TSceneAsset *sceneAsset,
-		int skinIndex,
-		int boneIndex);
+		float maxDelta, 
+		bool loop);
 
 	EMSCRIPTEN_KEEPALIVE void AnimationManager_getRestLocalTransforms(
 		TAnimationManager *tAnimationManager,
@@ -95,17 +91,6 @@ extern "C"
 		char *const outPtr,
 		int index);
 
-	EMSCRIPTEN_KEEPALIVE int AnimationManager_getBoneCount(
-		TAnimationManager *tAnimationManager,
-		TSceneAsset *sceneAsset,
-		int skinIndex);
-
-	EMSCRIPTEN_KEEPALIVE void AnimationManager_getBoneNames(
-		TAnimationManager *tAnimationManager,
-		TSceneAsset *sceneAsset,
-		const char **out,
-		int skinIndex);
-
 	EMSCRIPTEN_KEEPALIVE int AnimationManager_getMorphTargetNameCount(
 		TAnimationManager *tAnimationManager,
 		TSceneAsset *sceneAsset,
@@ -129,11 +114,11 @@ extern "C"
 		const float *const morphData,
 		int numWeights);
 
-	EMSCRIPTEN_KEEPALIVE bool AnimationManager_setGltfAnimationFrame(
+	EMSCRIPTEN_KEEPALIVE bool AnimationManager_setGltfAnimationTime(
 		TAnimationManager *tAnimationManager,
 		TSceneAsset *tSceneAsset,
 		int animationIndex,
-		int frame
+		float timeInSeconds
 	);
 
 

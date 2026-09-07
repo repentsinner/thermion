@@ -12,10 +12,23 @@
 #include <mutex>
 #include <thread>
 
-#include <Windows.h>
-#include <dxgi.h>
-#include <wrl.h>
-#include "vulkan_context.h"
+#include "windows/import.h"
+
+// Filament's `backend/Platform.h` (pulled in transitively by
+// `WindowsVulkanContext.h` below) friend-declares
+// `utils::io::ostream& operator<<(...)` without first declaring the
+// nested namespace itself. Sibling Filament headers like
+// `backend/DriverEnums.h` carry the forward declaration so the rest
+// of Filament compiles cleanly, but this plugin's translation unit
+// reaches `Platform.h` before any of them, leaving the namespace
+// undeclared and cl.exe rejecting the friend with
+// C3083 / C2039 / C4430. Mirror Filament's own forward declaration
+// here so the friend resolves.
+namespace utils::io {
+class ostream;
+}  // namespace utils::io
+
+#include "vulkan/windows/WindowsVulkanContext.h"
 
 namespace thermion::tflutter::windows {
 
@@ -54,7 +67,7 @@ public:
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   private:
-    thermion::windows::vulkan::ThermionVulkanContext *_context = nullptr;
+    thermion::vulkan::windows::WindowsVulkanContext *_context = nullptr;
     bool OnTextureUnregistered(int64_t flutterTextureId);
 
     // Pending handle swap: after resizeTexture creates new GPU resources,

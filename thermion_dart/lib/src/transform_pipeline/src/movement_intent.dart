@@ -2,12 +2,11 @@ import 'package:thermion_dart/thermion_dart.dart';
 import '../../bindings/bindings.dart' as bindings;
 import 'intent_action.dart';
 
-
-/// Dart wrapper around the native TMovementIntent//MovementIntent struct 
+/// Dart wrapper around the native TMovementIntent//MovementIntent struct
 /// (represents what the player wants to do this frame).
-/// 
-/// You probably don't need to use this - a MovementIntent is calculated 
-/// every frame (see Pipeline.hpp and MovementIntentCalculator.hpp). This Dart 
+///
+/// You probably don't need to use this - a MovementIntent is calculated
+/// every frame (see Pipeline.hpp and MovementIntentCalculator.hpp). This Dart
 /// wrapper is intended for testing only.
 ///
 
@@ -46,9 +45,9 @@ class MovementIntent {
     this.hasMovementIntent = false,
     this.hasRotationIntent = false,
     Map<IntentAction, double>? customIntents,
-  })  : movementDirection = movementDirection ?? Vector3.zero(),
-        mouseDelta = mouseDelta ?? Vector2.zero(),
-        customIntents = customIntents ?? {};
+  }) : movementDirection = movementDirection ?? Vector3.zero(),
+       mouseDelta = mouseDelta ?? Vector2.zero(),
+       customIntents = customIntents ?? {};
 
   /// Check if a custom intent is active
   bool hasCustomIntent(IntentAction action) {
@@ -118,11 +117,7 @@ class MovementIntent {
     final intentStates = native.intentStates;
 
     return MovementIntent(
-      movementDirection: Vector3(
-        native.movementDirectionX,
-        native.movementDirectionY,
-        native.movementDirectionZ,
-      ),
+      movementDirection: Vector3(native.movementDirectionX, native.movementDirectionY, native.movementDirectionZ),
       movementSpeed: native.movementSpeed,
       mouseDelta: Vector2(native.mouseDeltaX, native.mouseDeltaY),
       jumpIntent: (intentStates & bindings.JUMP_INTENT_MASK) != 0,

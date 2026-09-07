@@ -8,7 +8,9 @@
 #include "TMaterialProvider.h"
 #include "TVertexBuffer.h"
 #include "TIndexBuffer.h"
+#include "TBufferObject.h"
 #include "TTransformManager.h"
+#include "TLightManager.h"
 
 #ifdef __cplusplus
 namespace thermion
@@ -19,8 +21,11 @@ namespace thermion
         typedef int32_t EntityId;
         typedef void (*FilamentRenderCallback)(void *const owner);
 
-        EMSCRIPTEN_KEEPALIVE void RenderThread_create();
-        EMSCRIPTEN_KEEPALIVE void RenderThread_destroy();
+        EMSCRIPTEN_KEEPALIVE void* RenderThread_create();
+        // Creates a RenderThread that transfers the given canvas element
+        // (CSS selector) to its worker — one thread per viewer on web.
+        EMSCRIPTEN_KEEPALIVE void* RenderThread_createForCanvas(const char *canvasSelector);
+        EMSCRIPTEN_KEEPALIVE void RenderThread_destroy(void *renderThread);
         
         EMSCRIPTEN_KEEPALIVE void RenderThread_addTask(void (*task)());
         EMSCRIPTEN_KEEPALIVE void RenderManager_setRenderableRenderThread(TRenderManager *tRenderer, TSwapChain *tSwapChain, TView **tViews, uint8_t numViews, uint32_t requestId, VoidCallback onComplete);
@@ -30,6 +35,7 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE void RenderManager_removeAnimationManagerRenderThread(TRenderManager *tRenderManager, TAnimationManager *tAnimationManager, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void RenderManager_removeSwapChainRenderThread(TRenderManager *tRenderManager, TSwapChain *tSwapChain, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void AnimationManager_createRenderThread(TEngine *tEngine, void (*onComplete)(TAnimationManager *));
+        EMSCRIPTEN_KEEPALIVE void AnimationManager_destroyRenderThread(TAnimationManager *tAnimationManager, uint32_t requestId, VoidCallback onComplete);
 
         EMSCRIPTEN_KEEPALIVE void Engine_createRenderThread(
             TBackend backend,
@@ -40,6 +46,7 @@ namespace thermion
             void (*onComplete)(TEngine *)
         );
         EMSCRIPTEN_KEEPALIVE void Engine_createRendererRenderThread(TEngine *tEngine, void (*onComplete)(TRenderer *));
+        EMSCRIPTEN_KEEPALIVE void Engine_destroyRendererRenderThread(TEngine *tEngine, TRenderer *tRenderer, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Engine_createSwapChainRenderThread(TEngine *tEngine, void *window, uint64_t flags, void (*onComplete)(TSwapChain *));
         EMSCRIPTEN_KEEPALIVE void Engine_createHeadlessSwapChainRenderThread(TEngine *tEngine, uint32_t width, uint32_t height, uint64_t flags, void (*onComplete)(TSwapChain *));
         EMSCRIPTEN_KEEPALIVE void Engine_createCameraRenderThread(TEngine* tEngine, EntityId entityId, void (*onComplete)(TCamera *));
@@ -70,6 +77,7 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE void Texture_setExternalImageRenderThread(TEngine *tEngine, TTexture *tTexture, void *externalImage, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Texture_generateMipMapsRenderThread(TTexture *tTexture, TEngine *tEngine, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Ktx1Reader_createTextureRenderThread(TEngine *tEngine, TKtx1Bundle *tBundle, uint32_t requestId, VoidCallback onTextureUploadComplete, void (*onComplete)(TTexture *));
+        EMSCRIPTEN_KEEPALIVE void Ktx2Reader_createTextureRenderThread(TEngine *tEngine, uint8_t *data, size_t size, void (*onComplete)(TTexture *));
 
         EMSCRIPTEN_KEEPALIVE void Engine_destroyTextureRenderThread(TEngine *engine, TTexture* tTexture, uint32_t requestId,  VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Engine_createFenceRenderThread(TEngine *tEngine, void (*onComplete)(TFence*));
@@ -77,8 +85,8 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE void Engine_destroyFenceRenderThread(TEngine *tEngine, TFence *tFence, uint32_t requestId,  VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Engine_flushAndWaitRenderThread(TEngine *tEngine, uint32_t requestId,  VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Engine_executeRenderThread(TEngine *tEngine, uint32_t requestId,  VoidCallback onComplete);
-        EMSCRIPTEN_KEEPALIVE void Engine_buildSkyboxRenderThread(TEngine *tEngine, TTexture *tTexture, void (*onComplete)(TSkybox *));
-        EMSCRIPTEN_KEEPALIVE void Engine_buildColoredSkyboxRenderThread(TEngine *tEngine, float r, float g, float b, float a, void (*onComplete)(TSkybox *));
+        EMSCRIPTEN_KEEPALIVE void Engine_buildSkyboxRenderThread(TEngine *tEngine, TTexture *tTexture, bool showSun, float intensity, uint8_t priority, void (*onComplete)(TSkybox *));
+        EMSCRIPTEN_KEEPALIVE void Engine_buildColoredSkyboxRenderThread(TEngine *tEngine, float r, float g, float b, float a, bool showSun, float intensity, uint8_t priority, void (*onComplete)(TSkybox *));
         EMSCRIPTEN_KEEPALIVE void Engine_buildIndirectLightFromIrradianceTextureRenderThread(TEngine *tEngine, TTexture *tReflectionsTexture, TTexture* tIrradianceTexture, float intensity, void (*onComplete)(TIndirectLight *));
         EMSCRIPTEN_KEEPALIVE void Engine_buildIndirectLightFromIrradianceHarmonicsRenderThread(TEngine *tEngine, TTexture *tReflectionsTexture, float *harmonics, float intensity, void (*onComplete)(TIndirectLight *));
 
@@ -106,8 +114,6 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE void Material_createEdgeOutlineMaterialRenderThread(TEngine *tEngine, void (*onComplete)(TMaterial *));
         EMSCRIPTEN_KEEPALIVE void Material_createWireframeMaterialRenderThread(TEngine *tEngine, void (*onComplete)(TMaterial *));
         EMSCRIPTEN_KEEPALIVE void Material_createTranslationAxisMaterialRenderThread(TEngine *tEngine, void (*onComplete)(TMaterial *));
-
-        EMSCRIPTEN_KEEPALIVE void ColorGrading_createRenderThread(TEngine *tEngine, TToneMapper *toneMapper, void (*callback)(TColorGrading *));
 
         EMSCRIPTEN_KEEPALIVE void ColorGradingBuilder_createRenderThread(void (*onComplete)(TColorGradingBuilder *));
         EMSCRIPTEN_KEEPALIVE void ColorGradingBuilder_buildRenderThread(TColorGradingBuilder *tBuilder, TEngine *tEngine, void (*onComplete)(TColorGrading *));
@@ -156,6 +162,7 @@ namespace thermion
             TGltfAssetLoader *tAssetLoader,
             TNameComponentManager *tNameComponentManager,
             TFilamentAsset *tFilamentAsset,
+            uint32_t requiredGeometryCapabilities,
             void (*onComplete)(TSceneAsset *)
         );
         EMSCRIPTEN_KEEPALIVE void SceneAsset_createFromBuffersRenderThread(
@@ -165,10 +172,13 @@ namespace thermion
             TMaterialInstance **materialInstances,
             int materialInstanceCount,
             TPrimitiveType tPrimitiveType,
+            TVertexBufferStorageMode vertexBufferStorageMode,
             Aabb3 boundingBox,
             void (*callback)(TSceneAsset *)
         );
         EMSCRIPTEN_KEEPALIVE void SceneAsset_createInstanceRenderThread(TSceneAsset *asset, TMaterialInstance **tMaterialInstances, int materialInstanceCount, void (*callback)(TSceneAsset *));
+        EMSCRIPTEN_KEEPALIVE void SceneAsset_releaseSourceDataRenderThread(TSceneAsset *tSceneAsset, uint32_t requestId, VoidCallback onComplete);
+        EMSCRIPTEN_KEEPALIVE void SceneAsset_setFlatShadingRenderThread(TSceneAsset *tSceneAsset, bool flatShading, uint32_t requestId, VoidCallback onComplete);
         
         EMSCRIPTEN_KEEPALIVE void MaterialProvider_createMaterialInstanceRenderThread(
             TMaterialProvider *tMaterialProvider, 
@@ -211,6 +221,16 @@ namespace thermion
             bool hasIOR,
             bool hasVolume,
             void (*callback)(TMaterialInstance *));
+
+        EMSCRIPTEN_KEEPALIVE void AnimationManager_updateRenderThread(TAnimationManager *tAnimationManager, uint64_t frameTimeInNanos, uint32_t requestId, VoidCallback onComplete);
+
+        EMSCRIPTEN_KEEPALIVE void AnimationManager_setGltfAnimationTimeRenderThread(
+            TAnimationManager *tAnimationManager,
+            TSceneAsset *tSceneAsset,
+            int animationIndex,
+            float timeInSeconds,
+            uint32_t requestId,
+            VoidCallback onComplete);
 
         EMSCRIPTEN_KEEPALIVE void AnimationManager_updateBoneMatricesRenderThread(
             TAnimationManager *tAnimationManager,
@@ -329,17 +349,10 @@ namespace thermion
             uint32_t requestId, VoidCallback onComplete
         );
 
-        EMSCRIPTEN_KEEPALIVE void AnimationManager_setBoneTransformRenderThread(
-            TAnimationManager *tAnimationManager,
-            EntityId asset,
-            int skinIndex,
-            int boneIndex,
-            const float *const transform,
-            void (*callback)(bool));
-
         EMSCRIPTEN_KEEPALIVE void AnimationManager_resetToRestPoseRenderThread(TAnimationManager *tAnimationManager, TSceneAsset *tSceneAsset, uint32_t requestId, VoidCallback onComplete);
 
         EMSCRIPTEN_KEEPALIVE void GltfAssetLoader_createRenderThread(TEngine *tEngine, TMaterialProvider *tMaterialProvider, TNameComponentManager *tNameComponentManager, void (*callback)(TGltfAssetLoader *));
+        EMSCRIPTEN_KEEPALIVE void GltfAssetLoader_destroyRenderThread(TGltfAssetLoader *tAssetLoader, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void GltfResourceLoader_createRenderThread(TEngine *tEngine, void (*callback)(TGltfResourceLoader *));
         EMSCRIPTEN_KEEPALIVE void GltfResourceLoader_destroyRenderThread(TEngine *tEngine, TGltfResourceLoader *tResourceLoader, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void GltfResourceLoader_loadResourcesRenderThread(TGltfResourceLoader *tGltfResourceLoader, TFilamentAsset *tFilamentAsset, void (*callback)(bool));
@@ -353,11 +366,15 @@ namespace thermion
             TGltfAssetLoader *tAssetLoader,
             uint8_t *data,
             size_t length,
-            uint8_t numInstances,
+            uint32_t numInstances,
             void (*callback)(TFilamentAsset *)
         );
         EMSCRIPTEN_KEEPALIVE void Scene_addFilamentAssetRenderThread(TScene* tScene, TFilamentAsset *tAsset, uint32_t requestId, VoidCallback onComplete);
+        EMSCRIPTEN_KEEPALIVE void FilamentAsset_getWireframeRenderThread(TFilamentAsset *tFilamentAsset, void (*onComplete)(EntityId));
+        EMSCRIPTEN_KEEPALIVE void Scene_addEntityRenderThread(TScene *tScene, EntityId entityId, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Scene_removeEntityRenderThread(TScene *tScene, EntityId entityId, uint32_t requestId, VoidCallback onComplete);
+        EMSCRIPTEN_KEEPALIVE void SceneAsset_addToSceneRenderThread(TSceneAsset *tSceneAsset, TScene *tScene, uint32_t requestId, VoidCallback onComplete);
+        EMSCRIPTEN_KEEPALIVE void SceneAsset_removeFromSceneRenderThread(TSceneAsset *tSceneAsset, TScene *tScene, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Scene_setSkyboxRenderThread(TScene *tScene, TSkybox *tSkybox, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Scene_setIndirectLightRenderThread(TScene *tScene, TIndirectLight *tIndirectLight, uint32_t requestId, VoidCallback onComplete);
         EMSCRIPTEN_KEEPALIVE void Gizmo_createRenderThread(
@@ -390,6 +407,35 @@ namespace thermion
             void* data,
             size_t sizeInBytes,
             uint32_t byteOffset,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
+        EMSCRIPTEN_KEEPALIVE void VertexBuffer_setBufferObjectAtRenderThread(
+            TEngine* tEngine,
+            TVertexBuffer* tBuffer,
+            uint8_t bufferIndex,
+            TBufferObject* tBufferObject,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
+
+        EMSCRIPTEN_KEEPALIVE void BufferObjectBuilder_buildRenderThread(
+            TBufferObjectBuilder* tBuilder,
+            TEngine* tEngine,
+            void (*onComplete)(TBufferObject*)
+        );
+        EMSCRIPTEN_KEEPALIVE void BufferObject_setBufferRenderThread(
+            TEngine* tEngine,
+            TBufferObject* tBuffer,
+            void* data,
+            size_t sizeInBytes,
+            uint32_t byteOffset,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
+        EMSCRIPTEN_KEEPALIVE void BufferObject_destroyRenderThread(
+            TEngine* tEngine,
+            TBufferObject* tBuffer,
             uint32_t requestId,
             VoidCallback onComplete
         );
@@ -435,6 +481,15 @@ namespace thermion
             VoidCallback onComplete
         );
 
+        EMSCRIPTEN_KEEPALIVE void TransformManager_setParentRenderThread(
+            TTransformManager *tTransformManager,
+            EntityId child,
+            EntityId parent,
+            bool preserveScaling,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
+
         EMSCRIPTEN_KEEPALIVE void TransformManager_createComponentRenderThread(
             TTransformManager *tTransformManager,
             EntityId entityId,
@@ -456,16 +511,85 @@ namespace thermion
             VoidCallback onComplete
         );
 
-        typedef void (*FrameCallback)(uint64_t frameTimeNanos);
+        EMSCRIPTEN_KEEPALIVE void RenderableManager_setMorphWeightsRenderThread(
+            TRenderableManager *tRenderableManager,
+            EntityId entityId,
+            const float *weights,
+            size_t count,
+            size_t offset,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
 
-        EMSCRIPTEN_KEEPALIVE void FrameScheduler_start(FrameCallback callback, int targetFps);
-        EMSCRIPTEN_KEEPALIVE void FrameScheduler_stop();
+        EMSCRIPTEN_KEEPALIVE void RenderableManager_setBonesFromMat4RenderThread(
+            TRenderableManager *tRenderableManager,
+            EntityId entityId,
+            const float *transforms,
+            size_t boneCount,
+            size_t offset,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
 
-        // Port-based frame scheduler (hot restart safe)
-        // Initialize Dart API DL - must be called once before using port mode
-        EMSCRIPTEN_KEEPALIVE int FrameScheduler_initDartApi(void* data);
-        // Start frame scheduler in port mode - posts frame timestamps to Dart port
-        EMSCRIPTEN_KEEPALIVE void FrameScheduler_startWithPort(int64_t port, int targetFps);
+        EMSCRIPTEN_KEEPALIVE void RenderableManager_setBonesFromBoneRenderThread(
+            TRenderableManager *tRenderableManager,
+            EntityId entityId,
+            const float *bones,
+            size_t boneCount,
+            size_t offset,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
+
+        // Runtime geometry swaps must run on the render thread: Filament
+        // asserts that RenderableManager mutation happens there (the
+        // CommandStream thread check). Non-indexed/attribute-less variant —
+        // no IndexBuffer, [offset, count) select a vertex range. The result
+        // of the underlying setGeometryAt is delivered to the callback.
+        EMSCRIPTEN_KEEPALIVE void RenderableManager_setGeometryAtNonIndexedRenderThread(
+            TRenderableManager *tRenderableManager,
+            EntityId entityId,
+            int primitiveIndex,
+            uint8_t type,
+            TVertexBuffer *tVertices,
+            size_t offset,
+            size_t count,
+            void (*callback)(bool)
+        );
+
+        // Shadow flags MUST be applied on the render thread — Filament's
+        // RenderableManager/LightManager are not concurrency-safe, so the
+        // non-render-thread setters race the renderer and the flags don't take
+        // (realtime shadows never appear). These mirror the existing render-
+        // thread dispatch pattern.
+        EMSCRIPTEN_KEEPALIVE void RenderableManager_setCastShadowsRenderThread(
+            TRenderableManager *tRenderableManager,
+            EntityId entityId,
+            bool enabled,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
+        EMSCRIPTEN_KEEPALIVE void RenderableManager_setReceiveShadowsRenderThread(
+            TRenderableManager *tRenderableManager,
+            EntityId entityId,
+            bool enabled,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
+        EMSCRIPTEN_KEEPALIVE void LightManager_setShadowCasterRenderThread(
+            TLightManager *tLightManager,
+            EntityId entityId,
+            bool enabled,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
+        EMSCRIPTEN_KEEPALIVE void LightManager_setShadowOptionsRenderThread(
+            TLightManager *tLightManager,
+            EntityId entityId,
+            TShadowOptions options,
+            uint32_t requestId,
+            VoidCallback onComplete
+        );
 
 #ifdef __cplusplus
     }

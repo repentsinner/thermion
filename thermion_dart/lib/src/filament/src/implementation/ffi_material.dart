@@ -3,29 +3,29 @@ import 'package:thermion_dart/src/filament/src/implementation/ffi_texture.dart';
 import 'package:thermion_dart/thermion_dart.dart';
 
 class FFIMaterial extends Material<Pointer<TMaterial>> {
-  
   final Pointer<TMaterial> pointer;
 
-  FFIMaterial(this.pointer);
+  final FilamentApp _app;
+
+  FFIMaterial(this.pointer, this._app);
 
   @override
   Future<MaterialInstance> createInstance() async {
     var ptr = await withPointerCallback<TMaterialInstance>((cb) {
       Material_createInstanceRenderThread(pointer, cb);
     });
-    return FFIMaterialInstance(ptr);
+    return FFIMaterialInstance(ptr, _app);
   }
 
   Future destroy() async {
     await withVoidCallback((requestId, cb) {
-      Engine_destroyMaterialRenderThread(FilamentApp.instance!.engine, pointer, requestId, cb);
+      Engine_destroyMaterialRenderThread(_app.engine, pointer, requestId, cb);
     });
   }
 
   @override
   Future<bool> hasParameter(String propertyName) async {
-    return Material_hasParameter(
-        pointer, propertyName.toNativeUtf8().cast<Char>());
+    return Material_hasParameter(pointer, propertyName.toNativeUtf8().cast<Char>());
   }
 
   @override
@@ -42,7 +42,9 @@ class FFIMaterial extends Material<Pointer<TMaterial>> {
 class FFIMaterialInstance extends MaterialInstance<Pointer<TMaterialInstance>> {
   final Pointer<TMaterialInstance> pointer;
 
-  FFIMaterialInstance(this.pointer) {
+  final FilamentApp _app;
+
+  FFIMaterialInstance(this.pointer, this._app) {
     if (pointer == nullptr) {
       throw Exception("MaterialInstance not found");
     }
@@ -64,28 +66,21 @@ class FFIMaterialInstance extends MaterialInstance<Pointer<TMaterialInstance>> {
 
   @override
   Future setParameterFloat(String name, double value) async {
-    MaterialInstance_setParameterFloat(
-        pointer, name.toNativeUtf8().cast<Char>(), value);
+    MaterialInstance_setParameterFloat(pointer, name.toNativeUtf8().cast<Char>(), value);
   }
 
   @override
   Future setParameterFloat2(String name, double x, double y) async {
-    MaterialInstance_setParameterFloat2(
-        pointer, name.toNativeUtf8().cast<Char>(), x, y);
+    MaterialInstance_setParameterFloat2(pointer, name.toNativeUtf8().cast<Char>(), x, y);
   }
 
   @override
   Future setParameterFloat3(String name, double x, double y, double z) async {
-    MaterialInstance_setParameterFloat3(
-        pointer, name.toNativeUtf8().cast<Char>(), x, y, z);
+    MaterialInstance_setParameterFloat3(pointer, name.toNativeUtf8().cast<Char>(), x, y, z);
   }
 
   @override
   Future setParameterFloat3Array(String name, List<Vector3> array) async {
-    late Pointer stackPtr;
-    if (FILAMENT_WASM) {
-      //stackPtr = stackSave();
-    }
     final ptr = name.toNativeUtf8().cast<Char>();
     final data = Float64List(array.length * 3);
     int i = 0;
@@ -95,8 +90,7 @@ class FFIMaterialInstance extends MaterialInstance<Pointer<TMaterialInstance>> {
       data[i + 2] = item.z;
       i += 3;
     }
-    MaterialInstance_setParameterFloat3Array(
-        pointer, ptr, data.address, array.length * 3);
+    MaterialInstance_setParameterFloat3Array(pointer, ptr, data.address, array.length * 3);
 
     if (FILAMENT_WASM) {
       //stackRestore(stackPtr);
@@ -105,16 +99,13 @@ class FFIMaterialInstance extends MaterialInstance<Pointer<TMaterialInstance>> {
   }
 
   @override
-  Future setParameterFloat4(
-      String name, double x, double y, double z, double w) async {
-    MaterialInstance_setParameterFloat4(
-        pointer, name.toNativeUtf8().cast<Char>(), x, y, z, w);
+  Future setParameterFloat4(String name, double x, double y, double z, double w) async {
+    MaterialInstance_setParameterFloat4(pointer, name.toNativeUtf8().cast<Char>(), x, y, z, w);
   }
 
   @override
   Future setParameterInt(String name, int value) async {
-    MaterialInstance_setParameterInt(
-        pointer, name.toNativeUtf8().cast<Char>(), value);
+    MaterialInstance_setParameterInt(pointer, name.toNativeUtf8().cast<Char>(), value);
   }
 
   @override
@@ -123,34 +114,27 @@ class FFIMaterialInstance extends MaterialInstance<Pointer<TMaterialInstance>> {
   }
 
   @override
-  Future setStencilCompareFunction(SamplerCompareFunction func,
-      [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
-    MaterialInstance_setStencilCompareFunction(
-        pointer, func.index, face.toFFI());
+  Future setStencilCompareFunction(SamplerCompareFunction func, [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
+    MaterialInstance_setStencilCompareFunction(pointer, func.index, face.toFFI());
   }
 
   @override
-  Future setStencilOpDepthFail(StencilOperation op,
-      [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
+  Future setStencilOpDepthFail(StencilOperation op, [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
     MaterialInstance_setStencilOpDepthFail(pointer, op.index, face.toFFI());
   }
 
   @override
-  Future setStencilOpDepthStencilPass(StencilOperation op,
-      [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
-    MaterialInstance_setStencilOpDepthStencilPass(
-        pointer, op.index, face.toFFI());
+  Future setStencilOpDepthStencilPass(StencilOperation op, [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
+    MaterialInstance_setStencilOpDepthStencilPass(pointer, op.index, face.toFFI());
   }
 
   @override
-  Future setStencilOpStencilFail(StencilOperation op,
-      [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
+  Future setStencilOpStencilFail(StencilOperation op, [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
     MaterialInstance_setStencilOpStencilFail(pointer, op.index, face.toFFI());
   }
 
   @override
-  Future setStencilReferenceValue(int value,
-      [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
+  Future setStencilReferenceValue(int value, [StencilFace face = StencilFace.FRONT_AND_BACK]) async {
     MaterialInstance_setStencilReferenceValue(pointer, value, face.toFFI());
   }
 
@@ -182,8 +166,7 @@ class FFIMaterialInstance extends MaterialInstance<Pointer<TMaterialInstance>> {
 
   Future destroy() async {
     await withVoidCallback((requestId, cb) {
-      Engine_destroyMaterialInstanceRenderThread(
-          FilamentApp.instance!.engine, this.pointer, requestId, cb);
+      Engine_destroyMaterialInstanceRenderThread(_app.engine, this.pointer, requestId, cb);
     });
   }
 
@@ -198,38 +181,27 @@ class FFIMaterialInstance extends MaterialInstance<Pointer<TMaterialInstance>> {
   }
 
   @override
-  Future setParameterTexture(String name, covariant FFITexture texture,
-      covariant FFITextureSampler sampler) async {
-    MaterialInstance_setParameterTexture(pointer,
-        name.toNativeUtf8().cast<Char>(), texture.pointer, sampler.pointer);
+  Future setParameterTexture(String name, covariant FFITexture texture, covariant FFITextureSampler sampler) async {
+    MaterialInstance_setParameterTexture(pointer, name.toNativeUtf8().cast<Char>(), texture.pointer, sampler.pointer);
   }
 
   @override
   Future setParameterBool(String name, bool value) async {
-    MaterialInstance_setParameterBool(
-        pointer, name.toNativeUtf8().cast<Char>(), value);
+    MaterialInstance_setParameterBool(pointer, name.toNativeUtf8().cast<Char>(), value);
   }
 
   @override
   Future setParameterMat3(String name, Matrix3 matrix) async {
-    late Pointer stackPtr;
-    if (FILAMENT_WASM) {
-      //stackPtr = stackSave();
-    }
-
-    MaterialInstance_setParameterMat3(
-        pointer, name.toNativeUtf8().cast<Char>(), matrix.storage.address);
+    MaterialInstance_setParameterMat3(pointer, name.toNativeUtf8().cast<Char>(), matrix.storage.address);
 
     if (FILAMENT_WASM) {
-      //stackRestore(stackPtr);
       matrix.storage.free();
     }
   }
 
   @override
   Future setParameterMat4(String name, Matrix4 matrix) async {
-    MaterialInstance_setParameterMat4(
-        pointer, name.toNativeUtf8().cast<Char>(), matrix.storage.address);
+    MaterialInstance_setParameterMat4(pointer, name.toNativeUtf8().cast<Char>(), matrix.storage.address);
   }
 
   @override
@@ -243,7 +215,7 @@ extension TStencilFaceExt on StencilFace {
     return switch (this) {
       StencilFace.FRONT => TStencilFace.STENCIL_FACE_FRONT,
       StencilFace.BACK => TStencilFace.STENCIL_FACE_BACK,
-      StencilFace.FRONT_AND_BACK => TStencilFace.STENCIL_FACE_FRONT_AND_BACK
+      StencilFace.FRONT_AND_BACK => TStencilFace.STENCIL_FACE_FRONT_AND_BACK,
     };
   }
 }

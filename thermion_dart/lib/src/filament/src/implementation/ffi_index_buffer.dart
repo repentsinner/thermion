@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-import 'package:thermion_dart/src/filament/src/implementation/ffi_filament_app.dart';
 import '../../../bindings/bindings.dart' as bindings;
 import 'package:thermion_dart/thermion_dart.dart';
 
@@ -29,7 +27,7 @@ class FFIIndexBuffer extends IndexBuffer {
         byteData.length,
         byteOffset,
         requestId,
-        cb
+        cb,
       );
     });
   }
@@ -81,7 +79,7 @@ class FFIIndexBufferBuilder implements IndexBufferBuilder {
     _checkNotBuilt();
 
     final indexBufferPtr = await withPointerCallback<bindings.TIndexBuffer>(
-      (cb) => bindings.IndexBufferBuilder_buildRenderThread(_builderPtr!, _engine, cb)
+      (cb) => bindings.IndexBufferBuilder_buildRenderThread(_builderPtr!, _engine, cb),
     );
 
     bindings.IndexBufferBuilder_destroy(_builderPtr!);

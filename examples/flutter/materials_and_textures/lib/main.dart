@@ -97,7 +97,7 @@ class _MyHomePageState extends State<MyHomePage> {
       }
 
       _asset = await _viewer!.createGeometry(
-        GeometryHelper.cube(),
+        CubeGeometry.cube(),
         materialInstances: [_unlitMaterial],
       );
 
@@ -117,7 +117,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
     var imageBuffer = await rootBundle.load("assets/background.png");
 
-    var imageData = imageBuffer.buffer.asUint8List(imageBuffer.offsetInBytes);
+    var imageData = imageBuffer.buffer.asUint8List(
+        imageBuffer.offsetInBytes, imageBuffer.lengthInBytes);
 
     _image = await FilamentApp.instance!.decodeImage(imageData);
 

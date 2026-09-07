@@ -9,10 +9,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Validate arguments
 if [ $# -lt 3 ]; then
   echo "Usage: $0 <FILAMENT_BASE_DIR> <FILAMENT_VERSION> <OUTPUT_BASE_DIR> [options]"
-  echo "Example: $0 /path/to/filament v1.69.0 /path/to/output"
-  echo "         $0 /path/to/filament v1.69.0 /path/to/output --clean"
-  echo "         $0 /path/to/filament v1.69.0 /path/to/output --release"
-  echo "         $0 /path/to/filament v1.69.0 /path/to/output --tools-dir /path/to/tools"
+  echo "Example: $0 /path/to/filament v1.74.0 /path/to/output"
+  echo "         $0 /path/to/filament v1.74.0 /path/to/output --clean"
+  echo "         $0 /path/to/filament v1.74.0 /path/to/output --release"
+  echo "         $0 /path/to/filament v1.74.0 /path/to/output --tools-dir /path/to/tools"
   echo ""
   echo "Options:"
   echo "  --clean         Remove existing target directories before building"
@@ -146,6 +146,18 @@ sed -i.bak 's|\${architectures} \\$|\${architectures} -DFILAMENT_SKIP_SAMPLES=ON
 echo "Patching libz CMakeLists.txt for Emscripten..."
 sed -i.bak 's/set_target_properties(zlib zlibstatic PROPERTIES OUTPUT_NAME z)/set_target_properties(zlib PROPERTIES OUTPUT_NAME z)\n set_target_properties(zlibstatic PROPERTIES OUTPUT_NAME zstatic)/g' third_party/libz/CMakeLists.txt
 
+# emsdk 6.0.4 ships clang 19+, which adds new warning categories that Filament
+# promotes to hard errors via -Werror (e.g. -Wunused-template in robin-map, and
+# -Wlifetime-safety-* in tinyexr). Rather than chase each one, disable -Werror
+# for the web build so warnings stay non-fatal. Convert every standalone
+# -Werror to -Wno-error in Filament's CMake config (leaving -Werror=<specific>
+# untouched, though Filament doesn't use that form).
+echo "Disabling -Werror in Filament CMake for the web build..."
+grep -rl -- '-Werror' "$FILAMENT_BASE_DIR" --include='CMakeLists.txt' --include='*.cmake' \
+  | while read -r _cm; do
+      sed -i 's/-Werror\([^=]\)/-Wno-error\1/g; s/-Werror$/-Wno-error/g' "$_cm"
+    done
+
 # Ensure desktop tools are available (needed for web cross-compilation)
 if [ -n "$TOOLS_DIR" ]; then
   # Use prebuilt tools from a local directory
@@ -247,8 +259,8 @@ if [ "$BUILD_RELEASE" = true ]; then
     -DUSE_ZLIB=1 \
     -DIMPORT_EXECUTABLES_DIR=out \
     -DCMAKE_INSTALL_PREFIX="$FILAMENT_BASE_DIR/out/webgl-release/filament" \
-    -DWEBGL=1 \
-    -DWEBGL_PTHREADS=0 \
+    -DWASM=1 \
+    -DWASM_PTHREADS=0 \
     ../../ || {
     echo "Error: Filament release cmake configuration failed"
     exit 1
@@ -323,8 +335,8 @@ if [ "$BUILD_RELEASE" = true ]; then
   cmake -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$EMSCRIPTEN_CMAKE" \
-    -DCMAKE_C_FLAGS="-pthread -I../libz" \
-    -DCMAKE_CXX_FLAGS="-pthread -I../libz -matomics -mbulk-memory" \
+    -DCMAKE_C_FLAGS="-pthread -I../libz -I../../../../third_party/libz" \
+    -DCMAKE_CXX_FLAGS="-pthread -I../libz -I../../../../third_party/libz -matomics -mbulk-memory" \
     -DPNG_SHARED=OFF \
     -DZLIB_ROOT=../../../../third_party/libz \
     -DZLIB_LIBRARY=../../../../third_party/libz/libz.a \
@@ -347,8 +359,8 @@ if [ "$BUILD_RELEASE" = true ]; then
   cmake -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$EMSCRIPTEN_CMAKE" \
-    -DCMAKE_C_FLAGS="-pthread -I../libz" \
-    -DCMAKE_CXX_FLAGS="-pthread -I../libz -matomics -mbulk-memory -Wno-reserved-identifier -Wno-tautological-type-limit-compare -Wno-switch-default -Wno-sign-conversion -Wno-unsafe-buffer-usage" \
+    -DCMAKE_C_FLAGS="-pthread -I../libz -I../../../../third_party/libz" \
+    -DCMAKE_CXX_FLAGS="-pthread -I../libz -I../../../../third_party/libz -matomics -mbulk-memory -Wno-reserved-identifier -Wno-tautological-type-limit-compare -Wno-switch-default -Wno-sign-conversion -Wno-unsafe-buffer-usage" \
     -DPNG_SHARED=OFF \
     -DZLIB_ROOT=../../../../third_party/libz \
     -DZLIB_LIBRARY=../../../../third_party/libz/libz.a \
@@ -393,8 +405,8 @@ if [ "$BUILD_DEBUG" = true ]; then
     -DUSE_ZLIB=1 \
     -DIMPORT_EXECUTABLES_DIR=out \
     -DCMAKE_INSTALL_PREFIX="$FILAMENT_BASE_DIR/out/webgl-debug/filament" \
-    -DWEBGL=1 \
-    -DWEBGL_PTHREADS=0 \
+    -DWASM=1 \
+    -DWASM_PTHREADS=0 \
     ../../ || {
     echo "Error: Filament debug cmake configuration failed"
     exit 1
@@ -469,8 +481,8 @@ if [ "$BUILD_DEBUG" = true ]; then
   cmake -G Ninja \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_TOOLCHAIN_FILE="$EMSCRIPTEN_CMAKE" \
-    -DCMAKE_C_FLAGS="-pthread -I../libz" \
-    -DCMAKE_CXX_FLAGS="-pthread -I../libz -matomics -mbulk-memory" \
+    -DCMAKE_C_FLAGS="-pthread -I../libz -I../../../../third_party/libz" \
+    -DCMAKE_CXX_FLAGS="-pthread -I../libz -I../../../../third_party/libz -matomics -mbulk-memory" \
     -DPNG_SHARED=OFF \
     -DZLIB_ROOT=../../../../third_party/libz \
     -DZLIB_LIBRARY=../../../../third_party/libz/libz.a \
@@ -493,8 +505,8 @@ if [ "$BUILD_DEBUG" = true ]; then
   cmake -G Ninja \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_TOOLCHAIN_FILE="$EMSCRIPTEN_CMAKE" \
-    -DCMAKE_C_FLAGS="-pthread -I../libz" \
-    -DCMAKE_CXX_FLAGS="-pthread -I../libz -matomics -mbulk-memory -Wno-reserved-identifier -Wno-tautological-type-limit-compare -Wno-switch-default -Wno-sign-conversion -Wno-unsafe-buffer-usage" \
+    -DCMAKE_C_FLAGS="-pthread -I../libz -I../../../../third_party/libz" \
+    -DCMAKE_CXX_FLAGS="-pthread -I../libz -I../../../../third_party/libz -matomics -mbulk-memory -Wno-reserved-identifier -Wno-tautological-type-limit-compare -Wno-switch-default -Wno-sign-conversion -Wno-unsafe-buffer-usage" \
     -DPNG_SHARED=OFF \
     -DZLIB_ROOT=../../../../third_party/libz \
     -DZLIB_LIBRARY=../../../../third_party/libz/libz.a \
@@ -538,6 +550,15 @@ if [ "$BUILD_RELEASE" = true ]; then
     exit 1
   }
 
+  # v1.74.0+ builds zlib's SHARED target (named libz.a via OUTPUT_NAME) as an
+  # Emscripten shared module, which never yields a .a, so only libzstatic.a
+  # ships. The web CMakeLists links a `z` target expecting libz.a (both
+  # archives were byte-identical in v1.69.1), so alias it from the static
+  # build to keep the artifact contract.
+  if [ ! -f "$TARGET_RELEASE_DIR/libz.a" ] && [ -f "$TARGET_RELEASE_DIR/libzstatic.a" ]; then
+    cp "$TARGET_RELEASE_DIR/libzstatic.a" "$TARGET_RELEASE_DIR/libz.a"
+  fi
+
   # Copy .bc (bitcode) files if they exist
   find out/cmake-webgl-release -name "*.bc" -type f -exec cp {} "$TARGET_RELEASE_DIR/" \; 2>/dev/null
 fi
@@ -553,65 +574,56 @@ if [ "$BUILD_DEBUG" = true ]; then
     exit 1
   }
 
+  # See the release block above: v1.74.0+ only ships libzstatic.a; alias it
+  # so the `z` target in the web CMakeLists resolves.
+  if [ ! -f "$TARGET_DEBUG_DIR/libz.a" ] && [ -f "$TARGET_DEBUG_DIR/libzstatic.a" ]; then
+    cp "$TARGET_DEBUG_DIR/libzstatic.a" "$TARGET_DEBUG_DIR/libz.a"
+  fi
+
   # Copy .bc (bitcode) files if they exist
   find out/cmake-webgl-debug -name "*.bc" -type f -exec cp {} "$TARGET_DEBUG_DIR/" \; 2>/dev/null
 fi
 
-# Copy header files to thermion_dart
-# All shared headers go to native/include/filament/
-# Only uberarchive.h differs between debug/release, copied to debug/ and release/ subdirs
-THERMION_INCLUDE="$SCRIPT_DIR/../thermion_dart/native/include/filament"
+# Bundle the Filament header tree into each target zip directory so the web
+# R2 artifact is self-contained (libraries + matching headers), exactly like
+# the other platforms. The flat `include/` layout mirrors Filament's install
+# tree; gltfio/materials/uberarchive.h is the web-specific variant. This lets
+# `make wasm` source headers from the downloaded web zip instead of a
+# hand-committed tree that can drift on version bumps.
+copy_web_headers() {
+  local target_dir="$1"    # $TARGET_RELEASE_DIR or $TARGET_DEBUG_DIR
+  local header_src="$2"    # out/webgl-<mode>/filament/include
+  local inc="$target_dir/include"
 
-if [ "$BUILD_RELEASE" = true ]; then
-  HEADER_SOURCE="out/webgl-release/filament/include"
-elif [ "$BUILD_DEBUG" = true ]; then
-  HEADER_SOURCE="out/webgl-debug/filament/include"
-fi
-
-echo "Copying Filament header files to thermion_dart..."
-rm -rf "$THERMION_INCLUDE"
-mkdir -p "$THERMION_INCLUDE"
-cd "$FILAMENT_BASE_DIR"
-cp -R $HEADER_SOURCE/* "$THERMION_INCLUDE/" || {
-  echo "Error: Failed to copy Filament headers"
-  exit 1
-}
-
-# Copy imageio headers (not included in main include dir)
-mkdir -p "$THERMION_INCLUDE/imageio"
-cp -R libs/imageio/include/* "$THERMION_INCLUDE/imageio/" || {
-  echo "Error: Failed to copy imageio headers"
-  exit 1
-}
-
-# Copy release-specific uberarchive.h
-if [ "$BUILD_RELEASE" = true ]; then
-  mkdir -p "$THERMION_INCLUDE/release/gltfio/materials"
-  cp out/webgl-release/filament/include/gltfio/materials/uberarchive.h \
-    "$THERMION_INCLUDE/release/gltfio/materials/" || {
-    echo "Error: Failed to copy release uberarchive.h"
+  echo "Bundling Filament headers into $inc ..."
+  mkdir -p "$inc"
+  cp -R "$FILAMENT_BASE_DIR/$header_src/"* "$inc/" || {
+    echo "Error: Failed to copy Filament headers"
     exit 1
   }
-fi
 
-# Copy debug-specific uberarchive.h
+  # imageio headers (not part of the main install include dir).
+  # libs/imageio/include/ contains an imageio/ subdir, so copy into $inc/ to
+  # land at include/imageio/ImageDecoder.h (consumers include <imageio/...>).
+  cp -R "$FILAMENT_BASE_DIR/libs/imageio/include/"* "$inc/" || {
+    echo "Error: Failed to copy imageio headers"
+    exit 1
+  }
+
+  # stb_image.h (third-party header used by TTexture.cpp)
+  mkdir -p "$inc/third_party/stb"
+  cp "$FILAMENT_BASE_DIR/third_party/stb/stb_image.h" "$inc/third_party/stb/" || {
+    echo "Error: Failed to copy stb_image.h"
+    exit 1
+  }
+}
+
+if [ "$BUILD_RELEASE" = true ]; then
+  copy_web_headers "$TARGET_RELEASE_DIR" "out/webgl-release/filament/include"
+fi
 if [ "$BUILD_DEBUG" = true ]; then
-  mkdir -p "$THERMION_INCLUDE/debug/gltfio/materials"
-  cp out/webgl-debug/filament/include/gltfio/materials/uberarchive.h \
-    "$THERMION_INCLUDE/debug/gltfio/materials/" || {
-    echo "Error: Failed to copy debug uberarchive.h"
-    exit 1
-  }
+  copy_web_headers "$TARGET_DEBUG_DIR" "out/webgl-debug/filament/include"
 fi
-
-# Copy stb_image.h (third-party header used by TTexture.cpp)
-mkdir -p "$THERMION_INCLUDE/third_party/stb"
-cp "$FILAMENT_BASE_DIR/third_party/stb/stb_image.h" "$THERMION_INCLUDE/third_party/stb/" || {
-  echo "Error: Failed to copy stb_image.h"
-  exit 1
-}
-
-echo "Headers copied to: $THERMION_INCLUDE"
 
 # Create zip files
 if [ "$BUILD_RELEASE" = true ]; then

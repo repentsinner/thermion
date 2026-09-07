@@ -1,12 +1,34 @@
 import '../../../bindings/bindings.dart' as bindings;
 import 'package:thermion_dart/thermion_dart.dart';
+import 'ffi_buffer_object.dart';
 
 /// FFI implementation of VertexBuffer for native platforms.
 class FFIVertexBuffer extends VertexBuffer {
   final bindings.Pointer<bindings.TVertexBuffer> _ptr;
   final bindings.Pointer<bindings.TEngine> _engine;
+  final bool _ownedByCaller;
 
-  FFIVertexBuffer(this._ptr, this._engine);
+  @override
+  final VertexBufferStorageMode storageMode;
+
+  FFIVertexBuffer._(this._ptr, this._engine, {required this.storageMode, required bool ownedByCaller})
+    : _ownedByCaller = ownedByCaller;
+
+  factory FFIVertexBuffer.callerOwned(
+    bindings.Pointer<bindings.TVertexBuffer> ptr,
+    bindings.Pointer<bindings.TEngine> engine, {
+    required VertexBufferStorageMode storageMode,
+  }) {
+    return FFIVertexBuffer._(ptr, engine, storageMode: storageMode, ownedByCaller: true);
+  }
+
+  factory FFIVertexBuffer.assetOwned(
+    bindings.Pointer<bindings.TVertexBuffer> ptr,
+    bindings.Pointer<bindings.TEngine> engine, {
+    required VertexBufferStorageMode storageMode,
+  }) {
+    return FFIVertexBuffer._(ptr, engine, storageMode: storageMode, ownedByCaller: false);
+  }
 
   /// Returns the native handle for FFI calls.
   bindings.Pointer<bindings.TVertexBuffer> getNativeHandle() => _ptr;
@@ -17,8 +39,14 @@ class FFIVertexBuffer extends VertexBuffer {
   }
 
   @override
-  Future setBufferAt(int bufferIndex, TypedData data,
-      {int byteOffset = 0}) async {
+  Future setBufferAt(int bufferIndex, TypedData data, {int byteOffset = 0}) async {
+    if (storageMode != VertexBufferStorageMode.direct) {
+      throw StateError(
+        'VertexBuffer.setBufferAt requires direct storage. Build the buffer '
+        'without enableBufferObjects(), or load glTF assets with '
+        'requiredGeometryCapabilities containing writableVertices.',
+      );
+    }
     final byteData = data.asUint8List();
     await withVoidCallback((requestId, cb) {
       bindings.VertexBuffer_setBufferAtRenderThread(
@@ -29,13 +57,42 @@ class FFIVertexBuffer extends VertexBuffer {
         byteData.lengthInBytes,
         byteOffset,
         requestId,
-        cb
+        cb,
+      );
+    });
+  }
+
+  @override
+  Future<void> setBufferObjectAt(int bufferIndex, BufferObject bufferObject) async {
+    if (storageMode != VertexBufferStorageMode.bufferObjects) {
+      throw StateError(
+        'VertexBuffer.setBufferObjectAt requires BufferObject-backed storage. '
+        'Call VertexBufferBuilder.enableBufferObjects() before build().',
+      );
+    }
+    if (bufferObject is! FFIBufferObject) {
+      throw ArgumentError.value(bufferObject, 'bufferObject', 'must be created by this Filament backend');
+    }
+    if (!bufferObject.isOwnedBy(_engine)) {
+      throw ArgumentError.value(bufferObject, 'bufferObject', 'must belong to the same Filament engine');
+    }
+    await withVoidCallback((requestId, cb) {
+      bindings.VertexBuffer_setBufferObjectAtRenderThread(
+        _engine,
+        _ptr,
+        bufferIndex,
+        bufferObject.getNativeHandle(),
+        requestId,
+        cb,
       );
     });
   }
 
   @override
   Future destroy() async {
+    if (!_ownedByCaller) {
+      throw StateError('Cannot destroy a VertexBuffer borrowed from a ThermionAsset');
+    }
     await withVoidCallback((requestId, cb) {
       bindings.VertexBuffer_destroyRenderThread(_engine, _ptr, requestId, cb);
     });
@@ -74,6 +131,12 @@ class FFIVertexBufferBuilder implements VertexBufferBuilder {
   }
 
   @override
+  void enableBufferObjects({bool enabled = true}) {
+    _checkNotBuilt();
+    bindings.VertexBufferBuilder_enableBufferObjects(_builderPtr!, enabled);
+  }
+
+  @override
   void attribute(
     VertexAttribute attribute,
     int bufferIndex,
@@ -100,16 +163,17 @@ class FFIVertexBufferBuilder implements VertexBufferBuilder {
   void normalized(VertexAttribute attribute, {bool normalize = true}) {
     _checkNotBuilt();
     final attributeValue = _vertexAttributeToInt(attribute);
-    bindings.VertexBufferBuilder_normalized(
-        _builderPtr!, attributeValue, normalize);
+    bindings.VertexBufferBuilder_normalized(_builderPtr!, attributeValue, normalize);
   }
 
   @override
   Future<VertexBuffer> build() async {
     _checkNotBuilt();
 
+    final storageMode = vertexBufferStorageModeFromNative(bindings.VertexBufferBuilder_getStorageMode(_builderPtr!));
+
     final vertexBufferPtr = await withPointerCallback<bindings.TVertexBuffer>(
-      (cb) => bindings.VertexBufferBuilder_buildRenderThread(_builderPtr!, _engine, cb)
+      (cb) => bindings.VertexBufferBuilder_buildRenderThread(_builderPtr!, _engine, cb),
     );
 
     bindings.VertexBufferBuilder_destroy(_builderPtr!);
@@ -120,7 +184,7 @@ class FFIVertexBufferBuilder implements VertexBufferBuilder {
       throw Exception('Failed to build VertexBuffer');
     }
 
-    return FFIVertexBuffer(vertexBufferPtr, _engine);
+    return FFIVertexBuffer.callerOwned(vertexBufferPtr, _engine, storageMode: storageMode);
   }
 
   int _vertexAttributeToInt(VertexAttribute attribute) {
@@ -145,15 +209,15 @@ class FFIVertexBufferBuilder implements VertexBufferBuilder {
 
   int _vertexAttributeTypeToInt(VertexAttributeType type) {
     return switch (type) {
-      VertexAttributeType.BYTE => 0,   // TVERTEXATTRIBUTE_TYPE_BYTE
-      VertexAttributeType.BYTE2 => 1,  // TVERTEXATTRIBUTE_TYPE_BYTE2
-      VertexAttributeType.BYTE3 => 2,  // TVERTEXATTRIBUTE_TYPE_BYTE3
-      VertexAttributeType.BYTE4 => 3,  // TVERTEXATTRIBUTE_TYPE_BYTE4
-      VertexAttributeType.UBYTE => 4,  // TVERTEXATTRIBUTE_TYPE_UBYTE
+      VertexAttributeType.BYTE => 0, // TVERTEXATTRIBUTE_TYPE_BYTE
+      VertexAttributeType.BYTE2 => 1, // TVERTEXATTRIBUTE_TYPE_BYTE2
+      VertexAttributeType.BYTE3 => 2, // TVERTEXATTRIBUTE_TYPE_BYTE3
+      VertexAttributeType.BYTE4 => 3, // TVERTEXATTRIBUTE_TYPE_BYTE4
+      VertexAttributeType.UBYTE => 4, // TVERTEXATTRIBUTE_TYPE_UBYTE
       VertexAttributeType.UBYTE2 => 5, // TVERTEXATTRIBUTE_TYPE_UBYTE2
       VertexAttributeType.UBYTE3 => 6, // TVERTEXATTRIBUTE_TYPE_UBYTE3
       VertexAttributeType.UBYTE4 => 7, // TVERTEXATTRIBUTE_TYPE_UBYTE4
-      VertexAttributeType.SHORT => 8,  // TVERTEXATTRIBUTE_TYPE_SHORT
+      VertexAttributeType.SHORT => 8, // TVERTEXATTRIBUTE_TYPE_SHORT
       VertexAttributeType.SHORT2 => 9, // TVERTEXATTRIBUTE_TYPE_SHORT2
       VertexAttributeType.SHORT3 => 10, // TVERTEXATTRIBUTE_TYPE_SHORT3
       VertexAttributeType.SHORT4 => 11, // TVERTEXATTRIBUTE_TYPE_SHORT4
@@ -161,16 +225,34 @@ class FFIVertexBufferBuilder implements VertexBufferBuilder {
       VertexAttributeType.USHORT2 => 13, // TVERTEXATTRIBUTE_TYPE_USHORT2
       VertexAttributeType.USHORT3 => 14, // TVERTEXATTRIBUTE_TYPE_USHORT3
       VertexAttributeType.USHORT4 => 15, // TVERTEXATTRIBUTE_TYPE_USHORT4
-      VertexAttributeType.INT => 16,   // TVERTEXATTRIBUTE_TYPE_INT
-      VertexAttributeType.UINT => 17,  // TVERTEXATTRIBUTE_TYPE_UINT
+      VertexAttributeType.INT => 16, // TVERTEXATTRIBUTE_TYPE_INT
+      VertexAttributeType.UINT => 17, // TVERTEXATTRIBUTE_TYPE_UINT
       VertexAttributeType.FLOAT => 18, // TVERTEXATTRIBUTE_TYPE_FLOAT
       VertexAttributeType.FLOAT2 => 19, // TVERTEXATTRIBUTE_TYPE_FLOAT2
       VertexAttributeType.FLOAT3 => 20, // TVERTEXATTRIBUTE_TYPE_FLOAT3
       VertexAttributeType.FLOAT4 => 21, // TVERTEXATTRIBUTE_TYPE_FLOAT4
-      VertexAttributeType.HALF => 22,  // TVERTEXATTRIBUTE_TYPE_HALF
+      VertexAttributeType.HALF => 22, // TVERTEXATTRIBUTE_TYPE_HALF
       VertexAttributeType.HALF2 => 23, // TVERTEXATTRIBUTE_TYPE_HALF2
       VertexAttributeType.HALF3 => 24, // TVERTEXATTRIBUTE_TYPE_HALF3
       VertexAttributeType.HALF4 => 25, // TVERTEXATTRIBUTE_TYPE_HALF4
     };
   }
+}
+
+VertexBufferStorageMode vertexBufferStorageModeFromNative(int storageMode) {
+  return switch (storageMode) {
+    bindings.TVertexBufferStorageMode.VERTEX_BUFFER_STORAGE_MODE_DIRECT => VertexBufferStorageMode.direct,
+    bindings.TVertexBufferStorageMode.VERTEX_BUFFER_STORAGE_MODE_BUFFER_OBJECTS =>
+      VertexBufferStorageMode.bufferObjects,
+    _ => VertexBufferStorageMode.unknown,
+  };
+}
+
+int vertexBufferStorageModeToNative(VertexBufferStorageMode storageMode) {
+  return switch (storageMode) {
+    VertexBufferStorageMode.direct => bindings.TVertexBufferStorageMode.VERTEX_BUFFER_STORAGE_MODE_DIRECT,
+    VertexBufferStorageMode.bufferObjects =>
+      bindings.TVertexBufferStorageMode.VERTEX_BUFFER_STORAGE_MODE_BUFFER_OBJECTS,
+    VertexBufferStorageMode.unknown => bindings.TVertexBufferStorageMode.VERTEX_BUFFER_STORAGE_MODE_UNKNOWN,
+  };
 }

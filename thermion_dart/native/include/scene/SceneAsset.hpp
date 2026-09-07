@@ -9,6 +9,7 @@
 
 #include "CustomGeometry.hpp"
 #include "Log.hpp"
+#include "c_api/APIBoundaryTypes.h"
 
 namespace thermion {
 
@@ -56,7 +57,29 @@ class SceneAsset {
 
         virtual const filament::Aabb getBoundingBox() const = 0;
 
+        virtual uint32_t getGeometryCapabilities() const {
+            return SCENE_ASSET_GEOMETRY_CAPABILITY_NONE;
+        }
 
-    
+        virtual bool supportsFlatShading() const {
+            return false;
+        }
+
+        virtual TVertexBufferStorageMode getVertexBufferStorageMode(size_t primitiveIndex) const {
+            return VERTEX_BUFFER_STORAGE_MODE_UNKNOWN;
+        }
+
+        virtual size_t getBoneCount(size_t skinIndex) const {
+            return 0;
+        }
+
+        virtual const Entity *getBones(size_t skinIndex) const {
+            return nullptr;
+        }
+
+        virtual const char *getBoneName(size_t skinIndex, size_t boneIndex) const {
+            return nullptr;
+        }
+
 };
 }

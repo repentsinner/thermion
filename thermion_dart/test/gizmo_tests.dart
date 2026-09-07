@@ -3,32 +3,46 @@ import 'package:test/test.dart';
 import 'helpers.dart';
 
 void main() async {
+  // TODO(c9b41bdf): restore once the gizmo API migration is finished.
+  // GizmoAsset was decoupled from ThermionAsset in the web-support refactor
+  // (c9b41bdf), so addToScene/removeFromScene (which take ThermionAsset) no
+  // longer accept a gizmo; there is currently no add/remove API for gizmos
+  // (they auto-attach on creation via getGizmo/createGizmo). Original test
+  // body preserved below for when the API is restored.
+  /*
   final testHelper = TestHelper("gizmo");
-  
+
   await testHelper.setup();
 
   group("gizmo tests", () {
     test('add/remove translation gizmo', () async {
-      await testHelper.withViewer((viewer) async {
-        final gizmo = await viewer.getGizmo(GizmoType.translation);
-        await viewer.addToScene(gizmo);
-        await testHelper.capture(viewer.view, "translation_gizmo");
-        await viewer.removeFromScene(gizmo);
-        await testHelper.capture(viewer.view, "translation_gizmo_removed");
-      }, postProcessing: true, bg: kWhite);
+      await testHelper.withViewer(
+        (viewer) async {
+          final gizmo = await viewer.getGizmo(GizmoType.translation);
+          await viewer.addToScene(gizmo);
+          await testHelper.capture(viewer.view, "translation_gizmo");
+          await viewer.removeFromScene(gizmo);
+          await testHelper.capture(viewer.view, "translation_gizmo_removed");
+        },
+        postProcessing: true,
+        bg: kWhite,
+      );
     });
   });
 
-    test('add/remove rotation gizmo', () async {
-      await testHelper.withViewer((viewer) async {
-        
+  test('add/remove rotation gizmo', () async {
+    await testHelper.withViewer(
+      (viewer) async {
         final gizmo = await viewer.getGizmo(GizmoType.rotation);
         await viewer.addToScene(gizmo);
         await testHelper.capture(viewer.view, "rotation_gizmo");
         await viewer.removeFromScene(gizmo);
         await testHelper.capture(viewer.view, "rotation_gizmo_removed");
-      }, postProcessing: true, bg: kWhite);
-    });
+      },
+      postProcessing: true,
+      bg: kWhite,
+    );
+  });
 
   //   test('set gizmo transform', () async {
   //     await testHelper.withViewer((viewer) async {
@@ -136,7 +150,7 @@ void main() async {
   //         DirectLight.sun(direction: Vector3(0, 0, -1)..normalize()));
 
   //     final unlitMaterialInstance = await viewer.createUnlitMaterialInstance();
-  //     final cube = await viewer.createGeometry(GeometryHelper.cube(),
+  //     final cube = await viewer.createGeometry(GeometryUtils.cube(),
   //         materialInstance: unlitMaterialInstance);
   //     await viewer.setMaterialPropertyFloat4(
   //         cube, 'baseColorFactor', 0, 1, 1, 1, 1);
@@ -177,7 +191,7 @@ void main() async {
   //         .setCameraRotation(Quaternion.axisAngle(Vector3(1, 0, 0), -pi / 8));
   //     var materialInstance =
   //         await viewer.createUbershaderMaterialInstance(unlit: true);
-  //     var cube = await viewer.createGeometry(GeometryHelper.cube(),
+  //     var cube = await viewer.createGeometry(GeometryUtils.cube(),
   //         materialInstances: [materialInstance]);
 
   //     await viewer.setPostProcessing(true);
@@ -212,7 +226,7 @@ void main() async {
   //         Quaternion.axisAngle(Vector3(0, 1, 0), -pi / 8) *
   //             Quaternion.axisAngle(Vector3(1, 0, 0), -pi / 6));
   //     var cube =
-  //         await viewer.createGeometry(GeometryHelper.cube(), keepData: true);
+  //         await viewer.createGeometry(GeometryUtils.cube(), keepData: true);
   //     await viewer.setMaterialPropertyFloat4(
   //         cube, "baseColorFactor", 0, 1.0, 1.0, 1.0, 1.0);
   //     var textureData =
@@ -298,7 +312,7 @@ void main() async {
 
   //     final unlit = await viewer.createUnlitMaterialInstance();
   //     await viewer.destroyAsset(cube);
-  //     cube = await viewer.createGeometry(GeometryHelper.cube(),
+  //     cube = await viewer.createGeometry(GeometryUtils.cube(),
   //         materialInstance: unlit);
   //     var reconstructedTexture = await viewer.createTexture(pixelBufferPng);
   //     await viewer.applyTexture(reconstructedTexture, cube);
@@ -325,4 +339,5 @@ void main() async {
   //           .writeAsBytesSync(renderPng);
   //     }
   //   }, timeout: Timeout(Duration(minutes: 2)));
+  */
 }

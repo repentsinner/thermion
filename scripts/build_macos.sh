@@ -9,9 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Validate arguments
 if [ $# -lt 3 ]; then
   echo "Usage: $0 <FILAMENT_BASE_DIR> <FILAMENT_VERSION> <OUTPUT_BASE_DIR> [options]"
-  echo "Example: $0 /path/to/filament v1.69.0 /path/to/output"
-  echo "         $0 /path/to/filament v1.69.0 /path/to/output --clean"
-  echo "         $0 /path/to/filament v1.69.0 /path/to/output --release"
+  echo "Example: $0 /path/to/filament v1.74.0 /path/to/output"
+  echo "         $0 /path/to/filament v1.74.0 /path/to/output --clean"
+  echo "         $0 /path/to/filament v1.74.0 /path/to/output --release"
   echo ""
   echo "Options:"
   echo "  --clean         Remove existing target directories before building"
@@ -106,7 +106,19 @@ git checkout "${FILAMENT_VERSION}" || {
 
 # Patch Filament's build.sh to skip samples (add -DFILAMENT_SKIP_SAMPLES=ON to cmake commands)
 echo "Patching Filament build.sh to skip samples..."
-sed -i.bak 's|\${architectures} \\$|\${architectures} -DFILAMENT_SKIP_SAMPLES=ON \\|g' build.sh
+sed -i.bak 's|\${architectures} \\$|\${architectures} -DFILAMENT_SKIP_SAMPLES=ON -DFILAMENT_ENABLE_RTTI=ON \\|g' build.sh
+
+# Suppress warnings in the vendored tinyexr that trip its own -Weverything -Werror
+# (new in Filament v1.75.0; CLANG_COMPILE_FLAGS are per-source COMPILE_FLAGS,
+# appended after the strict flags, so the -Wno-* wins). Idempotent, no-op on
+# versions whose CMakeLists lacks the anchor string.
+echo "Patching tinyexr CMakeLists.txt..."
+TINYEXR_CMAKE="$FILAMENT_BASE_DIR/third_party/tinyexr/CMakeLists.txt"
+if grep -q "Wno-implicit-int-conversion" "$TINYEXR_CMAKE"; then
+  echo "Already patched"
+else
+  sed -i.bak 's|-Wno-unused-member-function|-Wno-unused-member-function -Wno-implicit-int-conversion -Wno-implicit-int-float-conversion -Wno-old-style-cast -Wno-sign-conversion -Wno-unused-parameter -Wno-unused-function -Wno-poison-system-directories|' "$TINYEXR_CMAKE"
+fi
 
 # Patch FFilamentAsset.h to allow overriding GLTFIO_USE_FILESYSTEM at compile time
 echo "Patching FFilamentAsset.h to disable GLTFIO_USE_FILESYSTEM..."
@@ -148,7 +160,9 @@ if [ "$BUILD_RELEASE" = true ]; then
   cd out/cmake-release/third_party
   rm -rf libz
   mkdir -p libz && cd libz
-  cmake -G Ninja -DCMAKE_BUILD_TYPE=Release "$FILAMENT_BASE_DIR/third_party/libz"
+  cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+    "$FILAMENT_BASE_DIR/third_party/libz"
   ninja
 
   # Build imageio for release
@@ -157,6 +171,7 @@ if [ "$BUILD_RELEASE" = true ]; then
   mkdir -p imageio && cd imageio
   cmake -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
           -DCMAKE_CXX_STANDARD=17 \
           -DZLIB_INCLUDE_DIR="$FILAMENT_BASE_DIR/third_party/libz" \
           -DZ_HAVE_UNISTD_H=1 \
@@ -172,6 +187,7 @@ if [ "$BUILD_RELEASE" = true ]; then
   mkdir -p tinyexr && cd tinyexr
   cmake -G Ninja \
           -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 \
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
           -DZLIB_INCLUDE_DIR="$FILAMENT_BASE_DIR/third_party/libz" \
           -DZ_HAVE_UNISTD_H=1 -DUSE_ZLIB=1 -DIMPORT_EXECUTABLES_DIR=out \
           -DCMAKE_CXX_FLAGS="-Wno-poison-system-directories -Wno-switch-default -I$FILAMENT_BASE_DIR/libs/image/include -I$FILAMENT_BASE_DIR/libs/utils/include -I$FILAMENT_BASE_DIR/libs/math/include -I$FILAMENT_BASE_DIR/third_party/tinyexr -I$FILAMENT_BASE_DIR/third_party/libpng -I$FILAMENT_BASE_DIR/third_party/basisu/encoder" \
@@ -187,7 +203,9 @@ if [ "$BUILD_DEBUG" = true ]; then
   git checkout -- third_party/libz/zconf.h
   cd out/cmake-debug/third_party
   mkdir -p libz && cd libz
-  cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug "$FILAMENT_BASE_DIR/third_party/libz"
+  cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+    "$FILAMENT_BASE_DIR/third_party/libz"
   ninja
 
   # Build imageio for debug
@@ -196,6 +214,7 @@ if [ "$BUILD_DEBUG" = true ]; then
   mkdir -p imageio && cd imageio
   cmake -G Ninja \
           -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
           -DCMAKE_CXX_STANDARD=17 \
           -DZLIB_INCLUDE_DIR="$FILAMENT_BASE_DIR/third_party/libz" \
           -DZ_HAVE_UNISTD_H=1 \
@@ -211,6 +230,7 @@ if [ "$BUILD_DEBUG" = true ]; then
   mkdir -p tinyexr && cd tinyexr
   cmake -G Ninja \
           -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 \
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
           -DZLIB_INCLUDE_DIR="$FILAMENT_BASE_DIR/third_party/libz" \
           -DZ_HAVE_UNISTD_H=1 -DUSE_ZLIB=1 -DIMPORT_EXECUTABLES_DIR=out \
           -DCMAKE_CXX_FLAGS="-Wno-poison-system-directories -Wno-switch-default -I$FILAMENT_BASE_DIR/libs/image/include -I$FILAMENT_BASE_DIR/libs/utils/include -I$FILAMENT_BASE_DIR/libs/math/include -I$FILAMENT_BASE_DIR/third_party/tinyexr -I$FILAMENT_BASE_DIR/third_party/libpng -I$FILAMENT_BASE_DIR/third_party/basisu/encoder" \
@@ -282,18 +302,89 @@ if [ "$BUILD_DEBUG" = true ]; then
   }
 fi
 
-# Copy header files to thermion_dart
-COPY_HEADERS_OPTS=""
-if [ "$BUILD_RELEASE" = true ] && [ "$BUILD_DEBUG" = false ]; then
-  COPY_HEADERS_OPTS="--release"
-elif [ "$BUILD_DEBUG" = true ] && [ "$BUILD_RELEASE" = false ]; then
-  COPY_HEADERS_OPTS="--debug"
+# Copy header files to target directories (for inclusion in R2 upload zips)
+echo "Copying header files to target directories..."
+
+if [ "$BUILD_RELEASE" = true ]; then
+  HEADER_SOURCE="out/release/filament/include"
+  echo "Copying headers to $TARGET_RELEASE_DIR/include..."
+  mkdir -p "$TARGET_RELEASE_DIR/include"
+  cp -R "$FILAMENT_BASE_DIR/$HEADER_SOURCE"/* "$TARGET_RELEASE_DIR/include/" || {
+    echo "Error: Failed to copy release headers to target"
+    exit 1
+  }
+
+  # Copy imageio headers
+  mkdir -p "$TARGET_RELEASE_DIR/include/imageio"
+  cp -R "$FILAMENT_BASE_DIR/libs/imageio/include"/* "$TARGET_RELEASE_DIR/include/" || {
+    echo "Error: Failed to copy imageio headers to target"
+    exit 1
+  }
+
+  # Copy stb_image.h
+  mkdir -p "$TARGET_RELEASE_DIR/include/third_party/stb"
+  cp "$FILAMENT_BASE_DIR/third_party/stb/stb_image.h" "$TARGET_RELEASE_DIR/include/third_party/stb/" || {
+    echo "Error: Failed to copy stb_image.h to target"
+    exit 1
+  }
+
+  # Copy bluevk headers (includes bluevk/BlueVK.h, vulkan/vulkan.h, vk_video/)
+  cp -R "$FILAMENT_BASE_DIR/libs/bluevk/include/"* "$TARGET_RELEASE_DIR/include/" || {
+    echo "Error: Failed to copy bluevk headers to target"
+    exit 1
+  }
+
+  # Copy release-specific uberarchive.h
+  mkdir -p "$TARGET_RELEASE_DIR/include/release/gltfio/materials"
+  cp "$FILAMENT_BASE_DIR/out/release/filament/include/gltfio/materials/uberarchive.h" \
+    "$TARGET_RELEASE_DIR/include/release/gltfio/materials/" || {
+    echo "Error: Failed to copy release uberarchive.h to target"
+    exit 1
+  }
 fi
 
-"$SCRIPT_DIR/copy_headers.sh" "$FILAMENT_BASE_DIR" $COPY_HEADERS_OPTS || {
-  echo "Error: Failed to copy headers"
-  exit 1
-}
+if [ "$BUILD_DEBUG" = true ]; then
+  HEADER_SOURCE="out/debug/filament/include"
+  echo "Copying headers to $TARGET_DEBUG_DIR/include..."
+  mkdir -p "$TARGET_DEBUG_DIR/include"
+  cp -R "$FILAMENT_BASE_DIR/$HEADER_SOURCE"/* "$TARGET_DEBUG_DIR/include/" || {
+    echo "Error: Failed to copy debug headers to target"
+    exit 1
+  }
+
+  # Copy imageio headers
+  mkdir -p "$TARGET_DEBUG_DIR/include/imageio"
+  cp -R "$FILAMENT_BASE_DIR/libs/imageio/include"/* "$TARGET_DEBUG_DIR/include/" || {
+    echo "Error: Failed to copy imageio headers to target"
+    exit 1
+  }
+
+  # Copy stb_image.h
+  mkdir -p "$TARGET_DEBUG_DIR/include/third_party/stb"
+  cp "$FILAMENT_BASE_DIR/third_party/stb/stb_image.h" "$TARGET_DEBUG_DIR/include/third_party/stb/" || {
+    echo "Error: Failed to copy stb_image.h to target"
+    exit 1
+  }
+
+  # Copy bluevk headers (includes bluevk/BlueVK.h, vulkan/vulkan.h, vk_video/)
+  cp -R "$FILAMENT_BASE_DIR/libs/bluevk/include/"* "$TARGET_DEBUG_DIR/include/" || {
+    echo "Error: Failed to copy bluevk headers to target"
+    exit 1
+  }
+
+  # Copy debug-specific uberarchive.h
+  mkdir -p "$TARGET_DEBUG_DIR/include/debug/gltfio/materials"
+  cp "$FILAMENT_BASE_DIR/out/debug/filament/include/gltfio/materials/uberarchive.h" \
+    "$TARGET_DEBUG_DIR/include/debug/gltfio/materials/" || {
+    echo "Error: Failed to copy debug uberarchive.h to target"
+    exit 1
+  }
+fi
+
+# Filament headers are bundled into the artifact zip's include/ above (per
+# target dir). They are no longer copied into a committed tree under
+# thermion_dart/native/include/filament — consumers source them from the
+# version-matched R2 artifact at build time (see thermion_dart/hook/build.dart).
 
 # Create zip files
 if [ "$BUILD_RELEASE" = true ]; then

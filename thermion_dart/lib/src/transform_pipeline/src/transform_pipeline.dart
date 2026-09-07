@@ -27,8 +27,6 @@ class MovementConfig {
   bool invertHorizontalMovement = false;
 }
 
-
-
 /// Singleton wrapper for Thermion Input Handler system functionality.
 ///
 /// This class provides a clean, type-safe API around the lower-level native bindings,
@@ -63,9 +61,7 @@ class InputPipeline {
       bindings.TransformPipeline_setEngine(engine);
       _initialized = true;
     } catch (e) {
-      throw Exception(
-        'Failed to initialize InputPipeline: $e',
-      );
+      throw Exception('Failed to initialize InputPipeline: $e');
     }
   }
 
@@ -77,9 +73,7 @@ class InputPipeline {
     try {
       bindings.TransformPipeline_registerPipelineStage(stage, ptr.cast());
     } catch (e) {
-      throw Exception(
-        'Failed to set invert horizontal look for entity: $e',
-      );
+      throw Exception('Failed to set invert horizontal look for entity: $e');
     } finally {
       free(ptr);
     }
@@ -159,11 +153,7 @@ class InputPipeline {
           );
 
         case ScrollEvent():
-          bindings.TransformPipeline_onScrollEvent(
-            event.localPosition.x,
-            event.localPosition.y,
-            event.delta,
-          );
+          bindings.TransformPipeline_onScrollEvent(event.localPosition.x, event.localPosition.y, event.delta);
 
         case TouchEvent():
           // Touch events not yet supported by native bindings
@@ -325,7 +315,9 @@ class InputPipeline {
       setMouseSensitivity(config.mouseSensitivity);
       setInvertMouseY(config.invertMouseY);
 
-      _logger.info('Applied input configuration with ${config.keyBindings.length} key bindings and ${config.mouseButtonBindings.length} mouse button bindings');
+      _logger.info(
+        'Applied input configuration with ${config.keyBindings.length} key bindings and ${config.mouseButtonBindings.length} mouse button bindings',
+      );
     } catch (e) {
       throw Exception('Failed to set input configuration: $e');
     }

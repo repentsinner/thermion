@@ -34,6 +34,7 @@ class TranslationAxisMaterial {
   /// );
   /// ```
   static Future<MaterialInstance> createMaterialInstance({
+    FilamentApp? app,
     required double originX,
     required double originY,
     required double originZ,
@@ -42,6 +43,7 @@ class TranslationAxisMaterial {
     double lineLength = 100.0,
   }) {
     return FFITranslationAxisMaterial.createTranslationAxisMaterialInstance(
+      app: app ?? FilamentApp.instance!,
       originX: originX,
       originY: originY,
       originZ: originZ,

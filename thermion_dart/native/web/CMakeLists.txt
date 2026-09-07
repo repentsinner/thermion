@@ -17,10 +17,16 @@ set(EMCC_CFLAGS ${EMCC_CFLAGS} -sEXPORT_NAME=${MODULE_NAME})
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sINITIAL_MEMORY=512mb)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sMODULARIZE)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sERROR_ON_UNDEFINED_SYMBOLS=0 )
-set(EMCC_CFLAGS ${EMCC_CFLAGS} -sEXPORTED_RUNTIME_METHODS=wasmExports,wasmTable,addFunction,removeFunction,ccall,cwrap,allocate,intArrayFromString,intArrayToString,getValue,setValue,UTF8ToString,stringToUTF8,writeArrayToMemory,lengthBytesUTF8,HEAPU8,HEAPU32,HEAPF32)
+set(EMCC_CFLAGS ${EMCC_CFLAGS} -sEXPORTED_RUNTIME_METHODS=wasmExports,wasmTable,addFunction,removeFunction,ccall,cwrap,intArrayFromString,intArrayToString,getValue,setValue,UTF8ToString,stringToUTF8,writeArrayToMemory,lengthBytesUTF8,HEAPU8,HEAPU32,HEAPF32)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sEXPORTED_FUNCTIONS=_malloc,stackAlloc,_free,stackSave,stackRestore)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sFULL_ES3)
-set(EMCC_CFLAGS ${EMCC_CFLAGS} -sPTHREAD_POOL_SIZE=1)
+# Pre-spawn one worker per engine/viewer (matches WebOptions.maxViewers
+# default). With a pool smaller than the viewer count, the Nth pthread_create
+# takes emscripten's lazy-spawn path (spawn + wasm load mid-flight), which is
+# fragile and can hang; the pool workers are loaded and awaited at module
+# startup instead. Each worker receives its own canvas at thread start
+# (emscripten_pthread_attr_settransferredcanvases).
+set(EMCC_CFLAGS ${EMCC_CFLAGS} -sPTHREAD_POOL_SIZE=8)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sALLOW_BLOCKING_ON_MAIN_THREAD=1)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sMALLOC=mimalloc)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sOFFSCREENCANVAS_SUPPORT=1)
@@ -32,24 +38,31 @@ set(EMCC_CFLAGS ${EMCC_CFLAGS} -sMAX_WEBGL_VERSION=2)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sFETCH=0)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sSHARED_MEMORY=0)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sFILESYSTEM=0)
-set(EMCC_CFLAGS ${EMCC_CFLAGS} -sUSE_PTHREADS)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(EMCC_CFLAGS ${EMCC_CFLAGS} -sASSERTIONS=2)
   set(EMCC_CFLAGS ${EMCC_CFLAGS} -sGL_ASSERTIONS=1)
   set(EMCC_CFLAGS ${EMCC_CFLAGS} -sGL_DEBUG=1)
   set(EMCC_CFLAGS ${EMCC_CFLAGS} -sSAFE_HEAP=1)
-  
+  set(EMCC_CFLAGS ${EMCC_CFLAGS} -sSAFE_HEAP_LOG=1)
+  set(EMCC_CFLAGS ${EMCC_CFLAGS} -sSTACK_OVERFLOW_CHECK=2)
   set(EMCC_CFLAGS ${EMCC_CFLAGS} -sWARN_UNALIGNED=1)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wcast-align -Wover-aligned")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wcast-align -Wover-aligned")
-  set(EMCC_CFLAGS ${EMCC_CFLAGS} -sSTACK_SIZE=10485760)
 endif()
 
 if(ENABLE_TRACING)
 add_compile_definitions(ENABLE_TRACING=1)
 message(STATUS "Enabling tracing")
 endif()
-set(EMCC_CFLAGS ${EMCC_CFLAGS} -sSTACK_SIZE=10485760)
+
+# pthread stack size defaults to 10 MB.
+# Override with -DTHERMION_STACK_SIZE=<bytes>.
+if(NOT DEFINED THERMION_STACK_SIZE)
+  set(THERMION_STACK_SIZE 10485760)
+endif()
+set(EMCC_CFLAGS ${EMCC_CFLAGS} -sSTACK_SIZE=${THERMION_STACK_SIZE})
+
+
 # set(EMCC_CFLAGS ${EMCC_CFLAGS} -sPROXY_TO_PTHREAD=1)
 # set(EMCC_CFLAGS ${EMCC_CFLAGS} "-sOFFSCREENCANVASES_TO_PTHREAD=#thermion_canvas")
 # set(EMCC_CFLAGS ${EMCC_CFLAGS} -sPROXY_TO_WORKER=1)
@@ -66,7 +79,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O1")
 endif()
 
-# Set to "ON" to enable verbose linking 
+# Set to "ON" to enable verbose linking
 set(CMAKE_VERBOSE_MAKEFILE OFF)
 
 add_link_options(${EMCC_CFLAGS} -pthread)
@@ -74,6 +87,34 @@ add_link_options(${EMCC_CFLAGS} -pthread)
 link_directories("${CMAKE_CURRENT_SOURCE_DIR}/lib") 
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY build/out)
+
+# Material backend variant selection.
+# Set -DTHERMION_MATERIAL_VARIANT=<value> on the cmake command line:
+#   native       — OpenGL+Metal+Vulkan (GLSL, SPIR-V, MSL) [default for native, not for web]
+#   webgpu       — WebGPU only (WGSL)
+#   web_webgl    — WebGL2 only (GLSL), smallest web variant
+#   web_combined — WebGL2 + WebGPU (GLSL + WGSL), runtime backend selection
+if(NOT DEFINED THERMION_MATERIAL_VARIANT)
+  set(THERMION_MATERIAL_VARIANT "web_webgl")
+endif()
+message(STATUS "Material variant: ${THERMION_MATERIAL_VARIANT}")
+
+# Collect material .c files for the selected variant only.
+# Using an explicit list avoids the glob picking up _native.c AND _webgpu.c
+# (which would cause duplicate symbol definitions).
+set(MATERIAL_SOURCES
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/capture_uv_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/grid_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/image_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/linear_depth_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/unlit_fixed_size_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/silhouette_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/edge_outline_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/wireframe_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/translation_axis_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/bone_overlay_${THERMION_MATERIAL_VARIANT}.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/gizmo_material_${THERMION_MATERIAL_VARIANT}.c"
+)
 
 file(GLOB SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/*.cpp"
@@ -84,7 +125,6 @@ file(GLOB SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/scene/*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/transform_pipeline/*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../include/resources/*.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/*.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/ThermionWebApi.cpp"
    # "${CMAKE_CURRENT_SOURCE_DIR}/../src/rendering/EmscriptenTest.cpp"
   )
@@ -117,11 +157,15 @@ else()
 endif()
 
 message(STATUS "Total source files being compiled: ${SOURCES}")
-add_executable(${MODULE_NAME} ${SOURCES})
+add_executable(${MODULE_NAME} ${SOURCES} ${MATERIAL_SOURCES})
 
 set_target_properties(${MODULE_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
 target_compile_definitions(${MODULE_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
+
+# Set the material backend define so forwarding headers resolve correctly.
+string(TOUPPER ${THERMION_MATERIAL_VARIANT} VARIANT_UPPER)
+target_compile_definitions(${MODULE_NAME} PRIVATE THERMION_MATERIAL_${VARIANT_UPPER})
 target_compile_options(${MODULE_NAME} PRIVATE -matomics -mbulk-memory)
 target_compile_features(${MODULE_NAME} PRIVATE cxx_std_17)
 
@@ -129,12 +173,16 @@ target_compile_features(${MODULE_NAME} PRIVATE cxx_std_17)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../src)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../include)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../include/filament)
+# Filament headers come from the version-matched web R2 artifact, extracted by
+# the `make wasm` target into lib/<mode>/include/ (flat layout, with the
+# web-specific gltfio/materials/uberarchive.h). This replaces a committed
+# Filament header tree that could drift on version bumps.
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../include/filament/debug)
+  set(FILAMENT_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/include")
 else()
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../include/filament/release)
+  set(FILAMENT_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/include")
 endif()
+include_directories(${FILAMENT_HEADERS_DIR})
 
 
 add_library(backend STATIC IMPORTED)
@@ -147,15 +195,15 @@ set_property(TARGET geometry PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_S
 set_property(TARGET geometry PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libgeometry.a")
 set_property(TARGET geometry PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libgeometry.a")
 
+add_library(mikktspace STATIC IMPORTED)
+set_property(TARGET mikktspace PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libmikktspace.a")
+set_property(TARGET mikktspace PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libmikktspace.a")
+set_property(TARGET mikktspace PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libmikktspace.a")
+
 add_library(filament STATIC IMPORTED)
 set_property(TARGET filament PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libfilament.a")
 set_property(TARGET filament PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilament.a")
 set_property(TARGET filament PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilament.a")
-
-add_library(filameshio STATIC IMPORTED)
-set_property(TARGET filameshio PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libfilameshio.a")
-set_property(TARGET filameshio PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilameshio.a")
-set_property(TARGET filameshio PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilameshio.a")
 
 add_library(filamat STATIC IMPORTED)
 set_property(TARGET filamat PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libfilamat.a")
@@ -181,16 +229,6 @@ add_library(image STATIC IMPORTED)
 set_property(TARGET image PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libimage.a")
 set_property(TARGET image PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libimage.a")
 set_property(TARGET image PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libimage.a")
-
-add_library(imageio STATIC IMPORTED)
-set_property(TARGET imageio PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libimageio.a")
-set_property(TARGET imageio  PROPERTY IMPORTED_LOCATION_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libimageio.a")
-set_property(TARGET imageio  PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libimageio.a")
-
-add_library(tinyexr STATIC IMPORTED)
-set_property(TARGET tinyexr PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libtinyexr.a")
-set_property(TARGET tinyexr PROPERTY IMPORTED_LOCATION_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libtinyexr.a")
-set_property(TARGET tinyexr PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libtinyexr.a")
 
 add_library(camutils STATIC IMPORTED)
 set_property(TARGET camutils PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libcamutils.a")
@@ -258,9 +296,9 @@ set_property(TARGET zstd  PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOUR
 set_property(TARGET zstd  PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libzstd.a")
 
 add_library(png STATIC IMPORTED)
-set_property(TARGET png PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libpng.a")
-set_property(TARGET png PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libpng.a")
-set_property(TARGET png PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libpng.a")
+set_property(TARGET png PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libpng16d.a")
+set_property(TARGET png PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libpng16.a")
+set_property(TARGET png PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libpng16.a")
 
 # Diagnostic: Check if EXTERNAL_ALL_LIBRARIES is visible
 if(DEFINED EXTERNAL_ALL_LIBRARIES)
@@ -283,13 +321,13 @@ target_link_libraries(${MODULE_NAME}
  filament
  backend
  geometry
+ mikktspace
  dracodec
  ibl-lite
  ktxreader
  filaflat
  filabridge
  image
- imageio
  utils
  stb
  uberzlib
@@ -300,7 +338,6 @@ target_link_libraries(${MODULE_NAME}
  z
  zstd
  png
- tinyexr
  ${EXTERNAL_ALL_LIBRARIES}
 )
 
@@ -314,5 +351,3 @@ if(DEFINED EXTERNAL_ALL_LIBRARIES)
   endforeach()
   message(STATUS "Added --whole-archive flags for external libraries to prevent dead code elimination")
 endif()
-
-

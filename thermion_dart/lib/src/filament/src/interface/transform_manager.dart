@@ -67,6 +67,15 @@ abstract class TransformManager<T> extends NativeHandle<T> {
   /// [transform] The local transform matrix (relative to parent)
   void setTransform(ThermionEntity entity, Matrix4 transform);
 
+  /// Sets the local transform matrix on the render thread.
+  ///
+  /// Use this when setting transforms from outside the render pass
+  /// (e.g. bone posing from a gizmo callback) to avoid race conditions.
+  ///
+  /// [entity] The entity containing the transform component
+  /// [transform] The local transform matrix (relative to parent)
+  Future setTransformAsync(ThermionEntity entity, Matrix4 transform);
+
   /// Scales the entity to fit within a unit cube while preserving aspect ratio.
   ///
   /// This is useful for normalizing assets to a consistent size.
@@ -84,8 +93,9 @@ abstract class TransformManager<T> extends NativeHandle<T> {
   ///
   /// [child] The child entity
   /// [parent] The parent entity (use null to remove parent)
-  /// [preserveScaling] Whether to preserve the child's world scale when reparenting
-  void setParent(ThermionEntity child, ThermionEntity? parent, {bool preserveScaling = false});
+  /// [preserveScaling] Whether to preserve the child's world scale when
+  /// reparenting
+  Future setParent(ThermionEntity child, ThermionEntity? parent, {bool preserveScaling = false});
 
   /// Gets the parent entity of the specified child entity.
   ///

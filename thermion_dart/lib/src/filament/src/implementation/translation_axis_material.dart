@@ -16,6 +16,7 @@ class FFITranslationAxisMaterial {
   ///
   /// Returns a configured [MaterialInstance] ready to use.
   static Future<MaterialInstance> createTranslationAxisMaterialInstance({
+    required FilamentApp app,
     required double originX,
     required double originY,
     required double originZ,
@@ -24,12 +25,12 @@ class FFITranslationAxisMaterial {
     double lineLength = 100.0,
   }) async {
     // Create translation axis material
-    final material = FFIMaterial(await withPointerCallback<TMaterial>(
-      (callback) => Material_createTranslationAxisMaterialRenderThread(
-        FilamentApp.instance!.engine,
-        callback,
+    final material = FFIMaterial(
+      await withPointerCallback<TMaterial>(
+        (callback) => Material_createTranslationAxisMaterialRenderThread(app.engine, callback),
       ),
-    ));
+      app,
+    );
 
     // Create and configure material instance
     final instance = await material.createInstance();

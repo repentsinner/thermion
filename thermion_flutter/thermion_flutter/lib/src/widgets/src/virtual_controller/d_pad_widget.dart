@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'virtual_controller_input_handler.dart';
 
 class DPadWidget extends StatefulWidget {
@@ -49,26 +50,18 @@ class _DPadWidgetState extends State<DPadWidget> {
           Positioned.fill(
             child: Column(
               children: [
-                Expanded(
-                  child: _buildDirectionButton(DPadDirection.up),
-                ),
+                Expanded(child: _buildDirectionButton(DPadDirection.up)),
                 Row(
                   children: [
-                    Expanded(
-                      child: _buildDirectionButton(DPadDirection.left),
-                    ),
+                    Expanded(child: _buildDirectionButton(DPadDirection.left)),
                     SizedBox(
                       width: widget.size * 0.4,
                       height: widget.size * 0.4,
                     ),
-                    Expanded(
-                      child: _buildDirectionButton(DPadDirection.right),
-                    ),
+                    Expanded(child: _buildDirectionButton(DPadDirection.right)),
                   ],
                 ),
-                Expanded(
-                  child: _buildDirectionButton(DPadDirection.down),
-                ),
+                Expanded(child: _buildDirectionButton(DPadDirection.down)),
               ],
             ),
           ),

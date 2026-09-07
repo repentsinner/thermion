@@ -11,7 +11,8 @@ void main() async {
 
   test('get entity names', () async {
     var asset = await FilamentApp.instance!.loadGltfFromBuffer(
-        File("${testHelper.assetsDir}/cube.glb").readAsBytesSync());
+      File("${testHelper.assetsDir}/cube.glb").readAsBytesSync(),
+    );
 
     expect(null, await FilamentApp.instance!.getNameForEntity(asset.entity));
     var children = await asset.getChildEntities();
@@ -23,8 +24,7 @@ void main() async {
   });
 
   test('get entity bounding boxes', () async {
-    var cube =
-        await FilamentApp.instance!.createGeometry(GeometryHelper.cube());
+    var cube = await FilamentApp.instance!.createGeometry(GeometryUtils.cube());
     var bb = await FilamentApp.instance!.getBoundingBox(cube.entity);
 
     expect(bb.center.x, 0.0);

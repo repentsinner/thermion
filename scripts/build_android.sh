@@ -6,9 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Validate arguments
 if [ $# -lt 3 ]; then
   echo "Usage: $0 <FILAMENT_BASE_DIR> <FILAMENT_VERSION> <OUTPUT_BASE_DIR> [options]"
-  echo "Example: $0 /path/to/filament v1.69.0 /path/to/output"
-  echo "         $0 /path/to/filament v1.69.0 /path/to/output --clean"
-  echo "         $0 /path/to/filament v1.69.0 /path/to/output --release"
+  echo "Example: $0 /path/to/filament v1.74.0 /path/to/output"
+  echo "         $0 /path/to/filament v1.74.0 /path/to/output --clean"
+  echo "         $0 /path/to/filament v1.74.0 /path/to/output --release"
   echo ""
   echo "Options:"
   echo "  --clean         Remove existing target directories before building"
@@ -102,7 +102,19 @@ git checkout "${FILAMENT_VERSION}" || {
 
 # Patch Filament's build.sh to skip samples (add -DFILAMENT_SKIP_SAMPLES=ON to cmake commands)
 echo "Patching Filament build.sh to skip samples..."
-sed -i.bak 's|\${architectures} \\$|\${architectures} -DFILAMENT_SKIP_SAMPLES=ON \\|g' build.sh
+sed -i.bak 's|\${architectures} \\$|\${architectures} -DFILAMENT_SKIP_SAMPLES=ON -DFILAMENT_ENABLE_RTTI=ON \\|g' build.sh
+
+# Suppress warnings in the vendored tinyexr that trip its own -Weverything -Werror
+# (new in Filament v1.75.0; CLANG_COMPILE_FLAGS are per-source COMPILE_FLAGS,
+# appended after the strict flags, so the -Wno-* wins). Idempotent, no-op on
+# versions whose CMakeLists lacks the anchor string.
+echo "Patching tinyexr CMakeLists.txt..."
+TINYEXR_CMAKE="$FILAMENT_BASE_DIR/third_party/tinyexr/CMakeLists.txt"
+if grep -q "Wno-implicit-int-conversion" "$TINYEXR_CMAKE"; then
+  echo "Already patched"
+else
+  sed -i.bak 's|-Wno-unused-member-function|-Wno-unused-member-function -Wno-implicit-int-conversion -Wno-implicit-int-float-conversion -Wno-old-style-cast -Wno-sign-conversion -Wno-unused-parameter -Wno-unused-function -Wno-poison-system-directories|' "$TINYEXR_CMAKE"
+fi
 
 # Set compiler to clang (Filament requires clang, rejects GCC)
 export CC=clang
@@ -244,13 +256,13 @@ if [ "$BUILD_RELEASE" = true ]; then
     CMAKE_ARCH=$(abi_to_cmake_arch "$ARCH")
     mkdir -p "$TARGET_RELEASE_DIR/$ARCH"
 
-    # Copy main Filament libraries
-    for lib in out/android-release/filament/lib/$ARCH/*.a; do
-      case "$(basename "$lib")" in
-        *zstd*) echo "Skipping $lib (bundled in Filament already)" ;;
-        *) cp "$lib" "$TARGET_RELEASE_DIR/$ARCH/" ;;
-      esac
-    done
+    # Copy main Filament libraries.
+    # libzstd.a MUST be staged: as of Filament 1.75.0 libfilamat.a has
+    # undefined zstd symbols and thermion_dart links -lzstd explicitly
+    # (see zip_android.sh). Skipping it here leaves the R2 artifact
+    # without libzstd.a and the Android link fails with
+    # "unable to find library -lzstd".
+    cp out/android-release/filament/lib/$ARCH/*.a "$TARGET_RELEASE_DIR/$ARCH/"
 
     # Copy imageio (built per-arch by build_third_party_for_arch)
     IMAGEIO_SRC="out/cmake-android-release-${CMAKE_ARCH}/third_party/imageio/libimageio.a"
@@ -283,13 +295,8 @@ if [ "$BUILD_DEBUG" = true ]; then
     CMAKE_ARCH=$(abi_to_cmake_arch "$ARCH")
     mkdir -p "$TARGET_DEBUG_DIR/$ARCH"
 
-    # Copy main Filament libraries
-    for lib in out/android-debug/filament/lib/$ARCH/*.a; do
-      case "$(basename "$lib")" in
-        *zstd*) echo "Skipping $lib (bundled in Filament already)" ;;
-        *) cp "$lib" "$TARGET_DEBUG_DIR/$ARCH/" ;;
-      esac
-    done
+    # Copy main Filament libraries (libzstd.a included; see release note above)
+    cp out/android-debug/filament/lib/$ARCH/*.a "$TARGET_DEBUG_DIR/$ARCH/"
 
     # Copy imageio (built per-arch by build_third_party_for_arch)
     IMAGEIO_SRC="out/cmake-android-debug-${CMAKE_ARCH}/third_party/imageio/libimageio.a"
@@ -311,61 +318,113 @@ if [ "$BUILD_DEBUG" = true ]; then
   done
 fi
 
-# Copy header files to thermion_dart
-# All shared headers go to native/include/filament/
-# Only uberarchive.h differs between debug/release, copied to debug/ and release/ subdirs
-THERMION_INCLUDE="$SCRIPT_DIR/../thermion_dart/native/include/filament"
+# Copy header files to target directories (for inclusion in R2 upload zips)
+echo "Copying header files to target directories..."
 
 if [ "$BUILD_RELEASE" = true ]; then
   HEADER_SOURCE="out/android-release/filament/include"
-elif [ "$BUILD_DEBUG" = true ]; then
-  HEADER_SOURCE="out/android-debug/filament/include"
-fi
+  echo "Copying headers to $TARGET_RELEASE_DIR/include..."
+  mkdir -p "$TARGET_RELEASE_DIR/include"
+  cp -R "$FILAMENT_BASE_DIR/$HEADER_SOURCE"/* "$TARGET_RELEASE_DIR/include/" || {
+    echo "Error: Failed to copy release headers to target"
+    exit 1
+  }
 
-echo "Copying Filament header files to thermion_dart..."
-rm -rf "$THERMION_INCLUDE"
-mkdir -p "$THERMION_INCLUDE"
-cd "$FILAMENT_BASE_DIR"
-cp -R $HEADER_SOURCE/* "$THERMION_INCLUDE/" || {
-  echo "Error: Failed to copy Filament headers"
-  exit 1
-}
+  # Filament's install rules never install libs/utils/include/utils/android/
+  # (those headers are internal to its own Android build), but the installed
+  # utils/Systrace.h includes <utils/android/Systrace.h> under __ANDROID__,
+  # and that header pulls in PerformanceHintManager.h. Copy the whole
+  # platform dir from the checked-out tag so the zip's include/ tree is
+  # complete for Android consumers.
+  mkdir -p "$TARGET_RELEASE_DIR/include/utils/android"
+  cp "$FILAMENT_BASE_DIR/libs/utils/include/utils/android/"*.h \
+      "$TARGET_RELEASE_DIR/include/utils/android/" || {
+    echo "Error: Failed to copy utils/android headers to target"
+    exit 1
+  }
 
-# Copy imageio headers (not included in main include dir)
-mkdir -p "$THERMION_INCLUDE/imageio"
-cp -R libs/imageio/include/* "$THERMION_INCLUDE/imageio/" || {
-  echo "Error: Failed to copy imageio headers"
-  exit 1
-}
+  # Copy imageio headers
+  mkdir -p "$TARGET_RELEASE_DIR/include/imageio"
+  cp -R "$FILAMENT_BASE_DIR/libs/imageio/include"/* "$TARGET_RELEASE_DIR/include/" || {
+    echo "Error: Failed to copy imageio headers to target"
+    exit 1
+  }
 
-# Copy release-specific uberarchive.h
-if [ "$BUILD_RELEASE" = true ]; then
-  mkdir -p "$THERMION_INCLUDE/release/gltfio/materials"
-  cp out/android-release/filament/include/gltfio/materials/uberarchive.h \
-    "$THERMION_INCLUDE/release/gltfio/materials/" || {
-    echo "Error: Failed to copy release uberarchive.h"
+  # Copy stb_image.h
+  mkdir -p "$TARGET_RELEASE_DIR/include/third_party/stb"
+  cp "$FILAMENT_BASE_DIR/third_party/stb/stb_image.h" "$TARGET_RELEASE_DIR/include/third_party/stb/" || {
+    echo "Error: Failed to copy stb_image.h to target"
+    exit 1
+  }
+
+  # Copy bluevk headers (includes bluevk/BlueVK.h, vulkan/vulkan.h, vk_video/)
+  cp -R "$FILAMENT_BASE_DIR/libs/bluevk/include/"* "$TARGET_RELEASE_DIR/include/" || {
+    echo "Error: Failed to copy bluevk headers to target"
+    exit 1
+  }
+
+  # Copy release-specific uberarchive.h
+  mkdir -p "$TARGET_RELEASE_DIR/include/release/gltfio/materials"
+  cp "$FILAMENT_BASE_DIR/out/android-release/filament/include/gltfio/materials/uberarchive.h" \
+    "$TARGET_RELEASE_DIR/include/release/gltfio/materials/" || {
+    echo "Error: Failed to copy release uberarchive.h to target"
     exit 1
   }
 fi
 
-# Copy debug-specific uberarchive.h
 if [ "$BUILD_DEBUG" = true ]; then
-  mkdir -p "$THERMION_INCLUDE/debug/gltfio/materials"
-  cp out/android-debug/filament/include/gltfio/materials/uberarchive.h \
-    "$THERMION_INCLUDE/debug/gltfio/materials/" || {
-    echo "Error: Failed to copy debug uberarchive.h"
+  HEADER_SOURCE="out/android-debug/filament/include"
+  echo "Copying headers to $TARGET_DEBUG_DIR/include..."
+  mkdir -p "$TARGET_DEBUG_DIR/include"
+  cp -R "$FILAMENT_BASE_DIR/$HEADER_SOURCE"/* "$TARGET_DEBUG_DIR/include/" || {
+    echo "Error: Failed to copy debug headers to target"
+    exit 1
+  }
+
+  # See the release branch above: Filament never installs utils/android/, but
+  # the installed utils/Systrace.h includes <utils/android/Systrace.h> under
+  # __ANDROID__. Bundle the platform dir from the source tree as well.
+  mkdir -p "$TARGET_DEBUG_DIR/include/utils/android"
+  cp "$FILAMENT_BASE_DIR/libs/utils/include/utils/android/"*.h \
+      "$TARGET_DEBUG_DIR/include/utils/android/" || {
+    echo "Error: Failed to copy utils/android headers to target"
+    exit 1
+  }
+
+  # Copy imageio headers
+  mkdir -p "$TARGET_DEBUG_DIR/include/imageio"
+  cp -R "$FILAMENT_BASE_DIR/libs/imageio/include"/* "$TARGET_DEBUG_DIR/include/" || {
+    echo "Error: Failed to copy imageio headers to target"
+    exit 1
+  }
+
+  # Copy stb_image.h
+  mkdir -p "$TARGET_DEBUG_DIR/include/third_party/stb"
+  cp "$FILAMENT_BASE_DIR/third_party/stb/stb_image.h" "$TARGET_DEBUG_DIR/include/third_party/stb/" || {
+    echo "Error: Failed to copy stb_image.h to target"
+    exit 1
+  }
+
+  # Copy bluevk headers (includes bluevk/BlueVK.h, vulkan/vulkan.h, vk_video/)
+  cp -R "$FILAMENT_BASE_DIR/libs/bluevk/include/"* "$TARGET_DEBUG_DIR/include/" || {
+    echo "Error: Failed to copy bluevk headers to target"
+    exit 1
+  }
+
+  # Copy debug-specific uberarchive.h
+  mkdir -p "$TARGET_DEBUG_DIR/include/debug/gltfio/materials"
+  cp "$FILAMENT_BASE_DIR/out/android-debug/filament/include/gltfio/materials/uberarchive.h" \
+    "$TARGET_DEBUG_DIR/include/debug/gltfio/materials/" || {
+    echo "Error: Failed to copy debug uberarchive.h to target"
     exit 1
   }
 fi
 
-# Copy stb_image.h (third-party header used by TTexture.cpp)
-mkdir -p "$THERMION_INCLUDE/third_party/stb"
-cp "$FILAMENT_BASE_DIR/third_party/stb/stb_image.h" "$THERMION_INCLUDE/third_party/stb/" || {
-  echo "Error: Failed to copy stb_image.h"
-  exit 1
-}
+# Filament headers are bundled into the artifact zip's include/ above (per
+# target dir). They are no longer copied into a committed tree under
+# thermion_dart/native/include/filament — consumers source them from the
+# version-matched R2 artifact at build time (see thermion_dart/hook/build.dart).
 
-echo "Headers copied to: $THERMION_INCLUDE"
 
 # Create zip files
 if [ "$BUILD_RELEASE" = true ]; then

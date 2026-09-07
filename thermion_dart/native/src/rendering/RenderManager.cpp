@@ -95,64 +95,114 @@ namespace thermion
     TRACE("Set %d view attachments for swapchain", numViews);
   }
 
+  void RenderManager::updateAnimationsAndPlugins(uint64_t frameTimeInNanos)
+  {
+    for (auto animationManager : mAnimationManagers)
+    {
+      animationManager->update(frameTimeInNanos);
+    }
+    thermion::plugin::UpdatePlugins(frameTimeInNanos);
+  }
+
+  bool RenderManager::renderSwapChainAt(size_t index, uint64_t frameTimeInNanos)
+  {
+    if (index >= mViewAttachments.size()) return false;
+    auto &attachment = mViewAttachments[index];
+    if (!attachment.swapChain)
+    {
+      Log("No swapchain, ignoring");
+      return false;
+    }
+
+    // Skip the entire begin/render/end cycle if no views are
+    // attached. setRendering(false) and detach(view) both remove the
+    // view from this entry's view list but leave the swap chain
+    // entry behind for later reattachment, so we can land in this
+    // function with the swap chain still in `mViewAttachments` but
+    // nothing to render. Calling beginFrame / endFrame on a swap
+    // chain that has no work is wasteful in single-viewer apps and
+    // dangerous in multi-viewer ones: Filament's Renderer is
+    // documented as one-Renderer-per-one-window, but Thermion shares
+    // a single Renderer across every swap chain in the engine, so
+    // its `mSwapChain` member gets set/cleared rapidly across the
+    // iteration. An empty-views begin/end fires the same internal
+    // state machine as a real frame, opening a window for the
+    // SwapChain validity assertion at endFrame:490 to trip during
+    // dispose / mount transitions.
+    bool hasAnyView = false;
+    for (int i = 0; i < numViewAttachments; i++)
+    {
+      if (attachment.views[i])
+      {
+        hasAnyView = true;
+        break;
+      }
+    }
+    if (!hasAnyView)
+    {
+      return false;
+    }
+
+    auto beforeBegin = std::chrono::high_resolution_clock::now();
+    bool beginFrame = mRenderer->beginFrame(attachment.swapChain, frameTimeInNanos);
+    auto afterBegin = std::chrono::high_resolution_clock::now();
+    float beginMs = std::chrono::duration_cast<std::chrono::nanoseconds>(afterBegin - beforeBegin).count() / 1e6f;
+
+    if (!beginFrame)
+    {
+      float sinceLastMs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::high_resolution_clock::now() - mLastRender).count() / 1e6f;
+      TRACE("Skipping frame for swapchain %zu (%.3f ms since last endFrame())", index, sinceLastMs);
+      (void)beginMs;
+      return false;
+    }
+
+    float sinceLastMs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::high_resolution_clock::now() - mLastRender).count() / 1e6f;
+    TRACE("Beginning frame for swapchain %zu (%.3f ms since last endFrame())", index, sinceLastMs);
+
+    int numRendered = 0;
+    for (int i = 0; i < numViewAttachments; i++)
+    {
+      if (!attachment.views[i]) break;
+      numRendered++;
+      mRenderer->render(attachment.views[i]);
+    }
+
+    auto beforeEnd = std::chrono::high_resolution_clock::now();
+    mRenderer->endFrame();
+    mLastRender = std::chrono::high_resolution_clock::now();
+    float endFrameMs = std::chrono::duration_cast<std::chrono::nanoseconds>(mLastRender - beforeEnd).count() / 1e6f;
+
+    TRACE("%d views rendered for swapchain %zu", numRendered, index);
+
+    if (endFrameMs > 5.0f) {
+      TRACE( "[RENDER] endFrame() took %.1fms (GPU stall?)\n", endFrameMs);
+    }
+
+    return numRendered > 0;
+  }
+
   bool RenderManager::render(uint64_t frameTimeInNanos)
   {
     auto startTime = std::chrono::high_resolution_clock::now();
 
     std::lock_guard lock(mMutex);
 
-    for (auto animationManager : mAnimationManagers)
-    {
-      animationManager->update(frameTimeInNanos);
-    }
-
-    thermion::plugin::UpdatePlugins(frameTimeInNanos);
+    updateAnimationsAndPlugins(frameTimeInNanos);
 
     auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - mLastRender).count() / 1e6f;
     TRACE("Updated animations in %.3f ms", durationNs);
 
     bool rendered = false;
-    int swapChainIndex = 0;
-
-    // Render each swapchain
-    for (auto &attachment : mViewAttachments)
+    int skippedCount = 0;
+    for (size_t i = 0; i < mViewAttachments.size(); i++)
     {
-      if (!attachment.swapChain)
-      {
-        Log("No swapchain, ignoring");
-        continue;
+      if (renderSwapChainAt(i, frameTimeInNanos)) {
+        rendered = true;
+      } else if (mViewAttachments[i].swapChain) {
+        skippedCount++;
       }
-
-      bool beginFrame = mRenderer->beginFrame(attachment.swapChain, frameTimeInNanos);
-      if (beginFrame)
-      {
-        durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - mLastRender).count() / 1e6f;
-        TRACE("Beginning frame for swapchain %d (%.3f ms since last endFrame())", swapChainIndex, durationNs);
-
-        int numRendered = 0;
-        for (int i = 0; i < numViewAttachments; i++)
-        {
-          if (!attachment.views[i]) {
-            break;
-          }
-          numRendered++;
-          mRenderer->render(attachment.views[i]);
-        }
-
-        mLastRender = std::chrono::high_resolution_clock::now();
-        mRenderer->endFrame();
-
-        TRACE("%d views rendered for swapchain %d", numRendered, swapChainIndex);
-        if (numRendered > 0) {
-          rendered = true;
-        }
-      }
-      else
-      {
-        durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - mLastRender).count() / 1e6f;
-        TRACE("Skipping frame for swapchain %d (%.3f ms since last endFrame())", swapChainIndex, durationNs);
-      }
-      swapChainIndex++;
     }
 
     #ifdef __EMSCRIPTEN__
@@ -163,8 +213,82 @@ namespace thermion
     durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count();
     float durationMs = durationNs / 1e6f;
 
-    TRACE("Total render() time for %d swapchains: %.3f ms", swapChainIndex, durationMs);
+    TRACE("Total render() time for %zu swapchains: %.3f ms", mViewAttachments.size(), durationMs);
+
+    static int renderCount = 0;
+    static int totalSkips = 0;
+    static float maxRenderMs = 0;
+    static float sumRenderMs = 0;
+    renderCount++;
+    totalSkips += skippedCount;
+    if (durationMs > maxRenderMs) maxRenderMs = durationMs;
+    sumRenderMs += durationMs;
+
+    if (renderCount <= 3 || renderCount % 120 == 0) {
+      float avgMs = sumRenderMs / (renderCount <= 3 ? renderCount : 120);
+      TRACE( "[RENDER] #%d %.1fms (avg=%.1fms max=%.1fms) skips=%d rendered=%d\n",
+              renderCount, durationMs, avgMs, maxRenderMs, totalSkips, rendered);
+      if (renderCount > 3) {
+        maxRenderMs = 0;
+        sumRenderMs = 0;
+        totalSkips = 0;
+      }
+    }
     return rendered;
+  }
+
+  void RenderManager::requestRender()
+  {
+    std::lock_guard lock(mMutex);
+    mRenderRequested = true;
+  }
+
+  void RenderManager::setPaused(bool paused)
+  {
+    std::lock_guard lock(mMutex);
+    mRenderPaused = paused;
+  }
+
+  bool RenderManager::tick(uint64_t frameTimeInNanos)
+  {
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    // Render unconditionally on every worker rAF. The mRenderRequested flag
+    // is kept in the API for symmetry with the native path but is not
+    // gating on web: Dart's main-thread _tick and this worker's mainLoop
+    // are independent 60Hz rAFs that aren't phase-locked. Gating on the flag
+    // drops ~5-10 fps whenever the worker rAF fires before Dart has had a
+    // chance to set it.
+    (void)mRenderRequested;
+
+    // Match pre-refactor RenderTicker semantics: render all swapchains
+    // synchronously and ALWAYS call mEngine->execute() — even if every
+    // beginFrame rejected or we're paused. Filament's WebGL backend queues
+    // commands in an internal buffer that needs to be drained every rAF,
+    // independent of whether a visible frame was produced. Skipping
+    // execute() stalls the backend and causes a burst on resume.
+    bool anyRendered = false;
+    if (!mRenderPaused) {
+      updateAnimationsAndPlugins(frameTimeInNanos);
+
+      for (size_t i = 0; i < mViewAttachments.size(); i++)
+      {
+        if (!mViewAttachments[i].swapChain) continue;
+        if (renderSwapChainAt(i, frameTimeInNanos)) {
+          anyRendered = true;
+        }
+      }
+    }
+
+#ifdef __EMSCRIPTEN__
+    mEngine->execute();
+#endif
+
+    if (anyRendered) {
+      mRenderRequested = false;
+    }
+
+    return anyRendered;
   }
 
   void RenderManager::addAnimationManager(AnimationManager *animationManager)

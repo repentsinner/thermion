@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
+
 import 'virtual_controller_input_handler.dart';
 
 class AnalogStickWidget extends StatefulWidget {
@@ -54,10 +55,14 @@ class _AnalogStickWidgetState extends State<AnalogStickWidget> {
             Positioned.fill(
               child: Container(
                 decoration: BoxDecoration(
-                  color: widget.backgroundColor.withValues(alpha: widget.opacity),
+                  color: widget.backgroundColor.withValues(
+                    alpha: widget.opacity,
+                  ),
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: widget.foregroundColor.withValues(alpha: widget.opacity * 0.5),
+                    color: widget.foregroundColor.withValues(
+                      alpha: widget.opacity * 0.5,
+                    ),
                     width: 2,
                   ),
                 ),
@@ -65,7 +70,9 @@ class _AnalogStickWidgetState extends State<AnalogStickWidget> {
             ),
             // Stick
             AnimatedPositioned(
-              duration: _isActive ? Duration.zero : const Duration(milliseconds: 150),
+              duration: _isActive
+                  ? Duration.zero
+                  : const Duration(milliseconds: 150),
               curve: Curves.easeOut,
               left: _stickPosition.dx - widget.size * 0.15,
               top: _stickPosition.dy - widget.size * 0.15,
@@ -74,8 +81,12 @@ class _AnalogStickWidgetState extends State<AnalogStickWidget> {
                 height: widget.size * 0.3,
                 decoration: BoxDecoration(
                   color: _isActive
-                      ? widget.stickColor.withValues(alpha: widget.opacity * 0.9)
-                      : widget.stickColor.withValues(alpha: widget.opacity * 0.6),
+                      ? widget.stickColor.withValues(
+                          alpha: widget.opacity * 0.9,
+                        )
+                      : widget.stickColor.withValues(
+                          alpha: widget.opacity * 0.6,
+                        ),
                   shape: BoxShape.circle,
                   boxShadow: [
                     BoxShadow(
@@ -98,10 +109,9 @@ class _AnalogStickWidgetState extends State<AnalogStickWidget> {
       _isActive = true;
       _stickPosition = details.localPosition;
     });
-    widget.inputHandler.handleAnalogStart(vm.Vector2(
-      details.localPosition.dx,
-      details.localPosition.dy,
-    ));
+    widget.inputHandler.handleAnalogStart(
+      vm.Vector2(details.localPosition.dx, details.localPosition.dy),
+    );
   }
 
   void _handlePanUpdate(DragUpdateDetails details) {
@@ -114,17 +124,17 @@ class _AnalogStickWidgetState extends State<AnalogStickWidget> {
       constrainedPosition = details.localPosition;
     } else {
       final angle = offset.direction;
-      constrainedPosition = _center + Offset.fromDirection(angle, widget.maxDistance);
+      constrainedPosition =
+          _center + Offset.fromDirection(angle, widget.maxDistance);
     }
 
     setState(() {
       _stickPosition = constrainedPosition;
     });
 
-    widget.inputHandler.handleAnalogMove(vm.Vector2(
-      constrainedPosition.dx,
-      constrainedPosition.dy,
-    ));
+    widget.inputHandler.handleAnalogMove(
+      vm.Vector2(constrainedPosition.dx, constrainedPosition.dy),
+    );
   }
 
   void _handlePanEnd(DragEndDetails details) {

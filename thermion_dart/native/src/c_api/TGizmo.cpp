@@ -66,7 +66,8 @@ namespace thermion
                 tEngine,
                 tAssetLoader,
                 tNameComponentManager,
-                tFilamentAsset);
+                tFilamentAsset,
+                SCENE_ASSET_GEOMETRY_CAPABILITY_NONE);
 
             auto *gltfSceneAsset = reinterpret_cast<GltfSceneAsset *>(sceneAsset);
 

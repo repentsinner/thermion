@@ -4,6 +4,7 @@ export 'dart:typed_data';
 import 'dart:async';
 import 'dart:io';
 import 'package:thermion_dart/thermion_dart.dart';
+import 'void_callback_registry.dart';
 export 'package:ffi/ffi.dart';
 export 'dart:ffi' hide Size;
 
@@ -63,8 +64,8 @@ class CallbackHolder<T extends Function> {
   }
 }
 
-Pointer<T> allocate<T extends NativeType>(int count) {
-  return calloc.allocate<T>(count * sizeOf<Pointer>());
+Pointer<T> allocate<T extends NativeType>(int byteCount) {
+  return calloc.allocate<T>(byteCount);
 }
 
 void free(Pointer ptr) {
@@ -88,14 +89,12 @@ class FinalizableUint8List implements Finalizable {
 
 extension GPFBP on void Function(int, double, double, double) {
   CallbackHolder<GizmoPickCallbackFunction> asCallback() {
-    var nativeCallable =
-        NativeCallable<GizmoPickCallbackFunction>.listener(this);
+    var nativeCallable = NativeCallable<GizmoPickCallbackFunction>.listener(this);
     return CallbackHolder(nativeCallable);
   }
 }
 
-CallbackHolder<PickCallbackFunction> makePickCallbackFunctionPointer(
-    DartPickCallbackFunction fn) {
+CallbackHolder<PickCallbackFunction> makePickCallbackFunctionPointer(DartPickCallbackFunction fn) {
   final nc = NativeCallable<PickCallbackFunction>.listener(fn);
   final cbh = CallbackHolder(nc);
   return cbh;
@@ -115,47 +114,27 @@ extension PCBF on DartPickCallbackFunction {
   }
 }
 
-int _requestId = 0;
-final _requests = <int, Completer>{};
+final _voidCallbackRegistry = VoidCallbackRegistry();
 
-void _voidCallbackHandler(int requestId) {
-  _requests[requestId]!.complete();
-}
-
-late NativeCallable<Void Function(Int32)> _voidCallbackNativeCallable =
-    NativeCallable<Void Function(Int32)>.listener(_voidCallbackHandler);
-
-Future<void> withVoidCallback(
-    Function(int, Pointer<NativeFunction<Void Function(Int32)>>) func) async {
-  var requestId = _requestId;
-  _requestId++;
-  final completer = Completer();
-  _requests[requestId] = completer;
-
-  _voidCallbackNativeCallable =
-      NativeCallable<Void Function(Int32)>.listener(_voidCallbackHandler);
-  func.call(requestId, _voidCallbackNativeCallable.nativeFunction.cast());
-
-  await completer.future;
-}
+Future<void> withVoidCallback(Function(int, Pointer<NativeFunction<Void Function(Int32)>>) func) =>
+    _voidCallbackRegistry.invoke(func);
 
 Future<Pointer<T>> withPointerCallback<T extends NativeType>(
-    Function(Pointer<NativeFunction<Void Function(Pointer<T>)>>) func) async {
+  Function(Pointer<NativeFunction<Void Function(Pointer<T>)>>) func,
+) async {
   final completer = Completer<Pointer<T>>();
   // ignore: prefer_function_declarations_over_variables
   void Function(Pointer<NativeType>) callback = (Pointer<NativeType> ptr) {
     completer.complete(ptr.cast<T>());
   };
-  final nativeCallable =
-      NativeCallable<Void Function(Pointer<NativeType>)>.listener(callback);
+  final nativeCallable = NativeCallable<Void Function(Pointer<NativeType>)>.listener(callback);
   func.call(nativeCallable.nativeFunction);
   var ptr = await completer.future;
   nativeCallable.close();
   return ptr;
 }
 
-Future<bool> withBoolCallback(
-    Function(Pointer<NativeFunction<Void Function(Bool)>>) func) async {
+Future<bool> withBoolCallback(Function(Pointer<NativeFunction<Void Function(Bool)>>) func) async {
   final completer = Completer<bool>();
   // ignore: prefer_function_declarations_over_variables
   void Function(bool) callback = (bool result) {
@@ -168,61 +147,52 @@ Future<bool> withBoolCallback(
   return completer.future;
 }
 
-Future<double> withFloatCallback(
-    Function(Pointer<NativeFunction<Void Function(Float)>>) func) async {
+Future<double> withFloatCallback(Function(Pointer<NativeFunction<Void Function(Float)>>) func) async {
   final completer = Completer<double>();
   // ignore: prefer_function_declarations_over_variables
   void Function(double) callback = (double result) {
     completer.complete(result);
   };
-  final nativeCallable =
-      NativeCallable<Void Function(Float)>.listener(callback);
+  final nativeCallable = NativeCallable<Void Function(Float)>.listener(callback);
   func.call(nativeCallable.nativeFunction);
   await completer.future;
   nativeCallable.close();
   return completer.future;
 }
 
-Future<int> withIntCallback(
-    Function(Pointer<NativeFunction<Void Function(Int32)>>) func) async {
+Future<int> withIntCallback(Function(Pointer<NativeFunction<Void Function(Int32)>>) func) async {
   final completer = Completer<int>();
   // ignore: prefer_function_declarations_over_variables
   void Function(int) callback = (int result) {
     completer.complete(result);
   };
-  final nativeCallable =
-      NativeCallable<Void Function(Int32)>.listener(callback);
+  final nativeCallable = NativeCallable<Void Function(Int32)>.listener(callback);
   func.call(nativeCallable.nativeFunction);
   await completer.future;
   nativeCallable.close();
   return completer.future;
 }
 
-Future<int> withUInt32Callback(
-    Function(Pointer<NativeFunction<Void Function(Uint32)>>) func) async {
+Future<int> withUInt32Callback(Function(Pointer<NativeFunction<Void Function(Uint32)>>) func) async {
   final completer = Completer<int>();
   // ignore: prefer_function_declarations_over_variables
   void Function(int) callback = (int result) {
     completer.complete(result);
   };
-  final nativeCallable =
-      NativeCallable<Void Function(Uint32)>.listener(callback);
+  final nativeCallable = NativeCallable<Void Function(Uint32)>.listener(callback);
   func.call(nativeCallable.nativeFunction);
   await completer.future;
   nativeCallable.close();
   return completer.future;
 }
 
-Future<String> withCharPtrCallback(
-    Function(Pointer<NativeFunction<Void Function(Pointer<Char>)>>)
-        func) async {
+Future<String> withCharPtrCallback(Function(Pointer<NativeFunction<Void Function(Pointer<Char>)>>) func) async {
   final completer = Completer<String>();
   // ignore: prefer_function_declarations_over_variables
   void Function(Pointer<Char>) callback = (Pointer<Char> result) {
     completer.complete(result.cast<Utf8>().toDartString());
   };
-  final nativeCallable =
-      NativeCallable<Void Function(Pointer<Char>)>.listener(callback);
+  final nativeCallable = NativeCallable<Void Function(Pointer<Char>)>.listener(callback);
   func.call(nativeCallable.nativeFunction);
   await completer.future;
   nativeCallable.close();
@@ -243,40 +213,36 @@ extension DartBigIntExtension on int {
 
 extension Float32ListExtension on Float32List {
   Uint8List asUint8List() {
-    return this.buffer.asUint8List(this.offsetInBytes);
+    return buffer.asUint8List(offsetInBytes, lengthInBytes);
   }
 }
 
-extension Int16ListExtension on Int32List {
+extension Int16ListExtension on Int16List {
   Uint8List asUint8List() {
-    return this.buffer.asUint8List(this.offsetInBytes);
+    return buffer.asUint8List(offsetInBytes, lengthInBytes);
   }
 }
 
 extension Int32ListExtension on Int32List {
   Uint8List asUint8List() {
-    return this.buffer.asUint8List(this.offsetInBytes);
+    return buffer.asUint8List(offsetInBytes, lengthInBytes);
   }
 }
 
 extension UInt16ListExtension on Uint16List {
   Uint8List asUint8List() {
-    return this.buffer.asUint8List(this.offsetInBytes);
+    return buffer.asUint8List(offsetInBytes, lengthInBytes);
   }
 }
 
 extension Uint32ListExtension on Uint32List {
   Uint8List asUint8List() {
-    return this.buffer.asUint8List(this.offsetInBytes);
+    return buffer.asUint8List(offsetInBytes, lengthInBytes);
   }
 }
 
 extension TypedDataListExtension on TypedData {
   Uint8List asUint8List() {
-    return this.buffer.asUint8List(this.offsetInBytes);
+    return buffer.asUint8List(offsetInBytes, lengthInBytes);
   }
-}
-
-void resizeWebCanvas(int width, int height) {
-  throw UnsupportedError("Not supported on non-web platforms");
 }

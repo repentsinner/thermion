@@ -13,11 +13,12 @@
 #include "material/image.h"
 #include "material/grid.h"
 #include "material/unlit_fixed_size.h"
-#include "material/outline.h"
 #include "material/silhouette.h"
 #include "material/edge_outline.h"
 #include "material/translation_axis.h"
+#include "material/gizmo.h"
 #include "material/wireframe.h"
+#include "material/bone_overlay.h"
 
 #include "c_api/TMaterialInstance.h"
 
@@ -70,7 +71,7 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE TMaterial *Material_createGizmoMaterial(TEngine *tEngine) {
             auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
             auto *material = filament::Material::Builder()
-                .package(UNLIT_FIXED_SIZE_UNLIT_FIXED_SIZE_DATA, UNLIT_FIXED_SIZE_UNLIT_FIXED_SIZE_SIZE)
+                .package(GIZMO_GIZMO_DATA, GIZMO_GIZMO_SIZE)
                 .build(*engine);
             return reinterpret_cast<TMaterial *>(material);
         }
@@ -103,6 +104,14 @@ namespace thermion
             auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
             auto *material = filament::Material::Builder()
                 .package(TRANSLATION_AXIS_TRANSLATION_AXIS_DATA, TRANSLATION_AXIS_TRANSLATION_AXIS_SIZE)
+                .build(*engine);
+            return reinterpret_cast<TMaterial *>(material);
+        }
+
+        EMSCRIPTEN_KEEPALIVE TMaterial *Material_createBoneOverlayMaterial(TEngine *tEngine) {
+            auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
+            auto *material = filament::Material::Builder()
+                .package(BONE_OVERLAY_BONE_OVERLAY_DATA, BONE_OVERLAY_BONE_OVERLAY_SIZE)
                 .build(*engine);
             return reinterpret_cast<TMaterial *>(material);
         }
@@ -239,7 +248,9 @@ namespace thermion
                 case STENCIL_FACE_FRONT: return filament::MaterialInstance::StencilFace::FRONT;
                 case STENCIL_FACE_BACK: return filament::MaterialInstance::StencilFace::BACK;
                 case STENCIL_FACE_FRONT_AND_BACK: return filament::MaterialInstance::StencilFace::FRONT_AND_BACK;
-                default: throw std::invalid_argument("Invalid TStencilFace value");
+                default:
+                    ERROR("Invalid TStencilFace value: %d", static_cast<int>(tface));
+                    return filament::MaterialInstance::StencilFace::FRONT_AND_BACK;
             }
         }
 

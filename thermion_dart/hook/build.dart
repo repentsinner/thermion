@@ -6,24 +6,43 @@ import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_c/native_toolchain_c.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as path;
-import 'log.dart';
-
+import '../lib/src/hooks/material_backend_resolution.dart';
+import '../lib/src/logging/log.dart';
 
 void main(List<String> args) async {
   await build(args, (BuildInput input, BuildOutputBuilder output) async {
     final packageRoot = input.packageRoot;
     var pkgRootFilePath = packageRoot.toFilePath(windows: Platform.isWindows);
 
-    final logger = createLogger(pkgRootFilePath, "build.log");
+    final logger = createBuildLogger(pkgRootFilePath, "build.log");
 
     if (!input.config.buildCodeAssets) {
       logger.info("buildCodeAssets is false, assumed to be building for web");
+      await _downloadWebArtifacts(input, logger);
+      return;
+    }
+
+    // Escape hatch for running pure-Dart tooling in this package — e.g.
+    // `bin/download_web.dart`, which only fetches prebuilt artifacts over HTTP
+    // and uses no native code — without paying for a host C++ build (and without
+    // needing a C++ toolchain on the runner at all). `dart run` always resolves
+    // this package's native assets and would otherwise fire the CBuilder below.
+    // Set `skip_native_build: true` under `hooks.user_defines.thermion_dart` in
+    // the *consuming* package's pubspec.yaml: CLI defines aren't supported, and
+    // env vars aren't forwarded into the hook subprocess (it gets a curated
+    // PATH/HOME-only environment). Placed after the web branch above so a web
+    // build still downloads its artifacts. Produces no code assets, so only safe
+    // for invocations that need no native library.
+    if (input.userDefines["skip_native_build"] == true) {
+      logger.info("skip_native_build userDefine is set; skipping host native build");
       return;
     }
 
     logger.info(input.assets.encodedAssets.keys.toList());
 
     final config = input.config;
+
+    logger.info("Config : ${input.config}");
 
     // Most users will only need release builds of Filament.
     // Debug builds are probably only relevant if you're a package developer debugging an internal Filament issue.
@@ -51,71 +70,180 @@ outputDirectory : ${outputDirectory.path}
 """);
 
     // Extract consuming package root for plugin support
-    final consumingPackageRoot =
-        _extractConsumingPackageRoot(input.outputDirectory.toString(), logger);
+    final consumingPackageRoot = _extractConsumingPackageRoot(input.outputDirectory.toString(), logger);
 
     var platform = targetOS.toString().toLowerCase();
 
     logger.info("Building Thermion for ${targetOS} in mode ${buildMode.name}");
 
-    final isIOSSimulator = targetOS == OS.iOS &&
-        config.code.iOS.targetSdk == IOSSdk.iPhoneSimulator;
+    // Detect backend early — it affects which R2 artifact we download,
+    // which static libs we link, and which material variant we compile.
+    //
+    // The "backend" user define selects the material/shader variant:
+    //   "native"  (default) — per-platform GLSL/SPIR-V/MSL set: Metal on
+    //                         iOS/macOS, Vulkan+OpenGL on Android and desktop
+    //   "webgpu"            — WebGPU only (WGSL). Enables native Dawn linking.
+    //   "webgl2"            — WebGL2 only (GLSL). Web-only, smallest variant.
+    //   "hybrid"            — WebGL2 + WebGPU combined (GLSL + WGSL). Web-only,
+    //                         enables runtime backend selection.
+    //
+    // Legacy: "webgpu: true" is equivalent to backend: "webgpu".
+    final backendRaw = input.userDefines["backend"];
+    final legacyWebgpu = input.userDefines["webgpu"];
+    final String backend;
+    if (backendRaw == "webgpu" || backendRaw == "WebGPU") {
+      backend = "webgpu";
+    } else if (backendRaw == "webgl2" || backendRaw == "WebGL2") {
+      backend = "webgl2";
+    } else if (backendRaw == "hybrid" || backendRaw == "combined") {
+      backend = "hybrid";
+    } else if (legacyWebgpu == true || legacyWebgpu == "true" || legacyWebgpu == 1 || legacyWebgpu == "1") {
+      backend = "webgpu"; // legacy compat
+    } else {
+      backend = "native";
+    }
 
-    var libDir = (await getLibDir(
-            packageRoot, targetOS, targetArchitecture, logger, buildMode,
-            isIOSSimulator: isIOSSimulator))
-        .path;
+    final isIOSSimulator = targetOS == OS.iOS && config.code.iOS.targetSdk == IOSSdk.iPhoneSimulator;
+
+    final libResult = await getLibDir(
+      packageRoot,
+      targetOS,
+      targetArchitecture,
+      logger,
+      buildMode,
+      isIOSSimulator: isIOSSimulator,
+    );
+    var libDir = libResult.libDir.path;
+    // Version-matched Filament headers extracted from the same R2 artifact as
+    // the libraries (see getLibDir). Expressed relative to the package root to
+    // match the convention of the other includeDirs entries.
+    final artifactIncludeRel = path.relative(libResult.includeDir.path, from: pkgRootFilePath);
 
     var sources = Directory(path.join(pkgRootFilePath, "native", "src"))
         .listSync(recursive: true)
         .whereType<File>()
         .map((f) => f.path)
-        .where((f) => !(f.contains("CMakeLists") || f.contains("main.cpp") || f.contains("build")))
+        .where((f) {
+          // Only check path relative to package root for exclusions
+          final relativePath = path.relative(f, from: pkgRootFilePath);
+          return !(relativePath.contains("CMakeLists") ||
+              relativePath.contains("main.cpp") ||
+              relativePath.contains("build"));
+        })
         .toList();
 
     if (targetOS != OS.windows) {
-      sources = sources.where((p) => !p.contains("windows")).toList();
+      sources = sources.where((p) => !p.contains("windows") && !p.contains("d3d")).toList();
     }
 
-    // Material source paths (used by _processMaterials below)
+    if (targetOS != OS.linux) {
+      sources = sources.where((p) => !p.contains("linux")).toList();
+    }
+
+    // iOS is Metal-only — exclude Vulkan-utility sources whose symbols
+    // resolve through `bluevk` (which iOS does not link). Without this
+    // exclusion, linking fails with "Undefined symbols: bluevk::vk*".
+    // See native/src/vulkan/{VulkanUtils,BaseVulkanTexture}.cpp.
+    if (targetOS == OS.iOS) {
+      sources = sources.where((p) => !p.contains("vulkan")).toList();
+    }
+
+    // Material source paths — platform-specific variants.
+    // Each material has per-platform native variants (_apple, _android,
+    // _desktop, _opengl, _vulkan) plus _webgpu, _web_webgl, and
+    // _web_combined variants, all with identical C symbols. The build hook
+    // compiles exactly one, resolved by resolveMaterialBackend:
+    //  - the "materials.backends" user define (per-OS backend subsets, e.g.
+    //    { android: [vulkan] } → _vulkan),
+    //  - else the "backend" user define (webgpu/webgl2/hybrid → their
+    //    variants, incl. native Dawn),
+    //  - else the target OS default (Apple = Metal, Android = Vulkan+GL,
+    //    desktop Linux/Windows = Vulkan+GL — both GL-capable platforms keep
+    //    runtime backend selection working).
+    final rawMaterialsDefine = input.userDefines["materials"];
+    final backendsConfig = rawMaterialsDefine is Map<String, dynamic>
+        ? rawMaterialsDefine["backends"] as Map<String, dynamic>?
+        : null;
+    final materialResolution = resolveMaterialBackend(
+      backendsConfig: backendsConfig,
+      targetOS: targetOS.toString().split('.').last.toLowerCase(),
+      backendOverride: backend == "native" ? null : backend,
+    );
+    for (final warning in materialResolution.warnings) {
+      logger.warning(warning);
+    }
+    final materialSuffix = materialResolution.suffix;
+    final materialDefine = materialResolution.define;
+
+    final defines = <String, String?>{};
+    final materialDir = path.join(pkgRootFilePath, 'native/include/material');
+    // A selected variant whose blobs are missing is a hard error: silently
+    // falling back would compile the wrong backends into the app.
+    if (!File(path.join(materialDir, 'image$materialSuffix.c')).existsSync()) {
+      throw Exception(
+        "Material variant '$materialSuffix' (define $materialDefine) was "
+        "selected but its generated files are missing from $materialDir.\n"
+        "Run scripts/regenerate-materials.sh (or the Regenerate Materials CI "
+        "workflow) to generate all variant blobs, or adjust the "
+        "materials.backends configuration in your pubspec.yaml.",
+      );
+    }
+    defines[materialDefine] = "1";
+    String materialPath(String name, String suffix) {
+      final suffixed = path.join(materialDir, '${name}$suffix.c');
+      if (File(suffixed).existsSync()) return 'native/include/material/${name}$suffix.c';
+      // Fallback: unsuffixed .c (pre-split materials)
+      final fallbackName = name == 'gizmo' ? 'gizmo_material' : name;
+      return 'native/include/material/$fallbackName.c';
+    }
+
     final materialSources = <String, String>{
-      'capture_uv': 'native/include/material/capture_uv.c',
-      'grid': 'native/include/material/grid.c',
-      'image': 'native/include/material/image.c',
-      'linear_depth': 'native/include/material/linear_depth.c',
-      'unlit_fixed_size': 'native/include/material/unlit_fixed_size.c',
-      'silhouette': 'native/include/material/silhouette.c',
-      'edge_outline': 'native/include/material/edge_outline.c',
-      'wireframe': 'native/include/material/wireframe.c',
-      'translation_axis': 'native/include/material/translation_axis.c'
+      'capture_uv': materialPath('capture_uv', materialSuffix),
+      'grid': materialPath('grid', materialSuffix),
+      'image': materialPath('image', materialSuffix),
+      'linear_depth': materialPath('linear_depth', materialSuffix),
+      'unlit_fixed_size': materialPath('unlit_fixed_size', materialSuffix),
+      'silhouette': materialPath('silhouette', materialSuffix),
+      'edge_outline': materialPath('edge_outline', materialSuffix),
+      'wireframe': materialPath('wireframe', materialSuffix),
+      'translation_axis': materialPath('translation_axis', materialSuffix),
+      // Renamed from gizmo.c to avoid a case-insensitive .obj collision
+      // with scene/Gizmo.cpp on Windows.
+      'gizmo': materialPath('gizmo_material', materialSuffix),
+      'bone_overlay': materialPath('bone_overlay', materialSuffix),
     };
 
     // Add gizmo resources (always included)
     sources.addAll([
-      path.join(pkgRootFilePath, "native", "include", "resources",
-          "translation_gizmo_glb.c"),
-      path.join(pkgRootFilePath, "native", "include", "resources",
-          "rotation_gizmo_glb.c"),
+      path.join(pkgRootFilePath, "native", "include", "resources", "translation_gizmo_glb.c"),
+      path.join(pkgRootFilePath, "native", "include", "resources", "rotation_gizmo_glb.c"),
     ]);
 
     // Add Dart API DL for port-based frame scheduling (hot restart safe)
-    sources.add(path.join(pkgRootFilePath, "native", "include", "dart",
-        "dart_api_dl.c"));
+    sources.add(path.join(pkgRootFilePath, "native", "include", "dart", "dart_api_dl.c"));
+
+    logger.info("Sources : $sources");
 
     var libs = [
       "filament",
       "backend",
-      "filameshio",
-	if (targetOS != OS.iOS) "filamat",
+      if (targetOS != OS.iOS) "filamat",
       if (targetOS == OS.linux) "shaders",
       "utils",
+      // Android links Filament's Perfetto tracing archive. utils is always
+      // built with src/android/Systrace.cpp on Android, and its debug object
+      // references perfetto::internal::InProcessTracingBackend::GetInstance().
+      // build_android.sh bundles libperfetto.a in both release and debug zips;
+      // linking it unconditionally is harmless when unused (static archives
+      // only yield members needed to resolve references). Without it the
+      // shared library keeps an undefined perfetto symbol and dlopen fails at
+      // runtime: "cannot locate symbol ...InProcessTracingBackend...".
+      if (targetOS == OS.android) "perfetto",
       "filabridge",
       "gltfio_core",
       if (targetOS != OS.android && targetOS != OS.iOS) "gltfio",
       "filament-iblprefilter",
       "image",
-      "imageio",
-      "tinyexr",
       "filaflat",
       "dracodec",
       "ibl",
@@ -126,53 +254,99 @@ outputDirectory : ${outputDirectory.path}
       "smol-v",
       "basis_transcoder",
       "uberarchive",
-      if (!{OS.linux, OS.android}.contains(targetOS)) "zstd",
+      // Filament 1.75.0's libfilamat.a references external ZSTD_* symbols
+      // (e.g. ZSTD_getFrameContentSize). Desktop/iOS/Android have no guarantee
+      // of a system libzstd, so link the static libzstd.a bundled in the R2
+      // artifact for every platform except Linux, which uses the system
+      // libzstd.so. Without this, Android dlopen fails at runtime with
+      // "cannot locate symbol ZSTD_getFrameContentSize" (Android ships no
+      // libzstd), and the libzstd.a must be present in the Android zip — see
+      // scripts/zip_android.sh.
+      if (targetOS != OS.linux) "zstd",
       //"mikktspace",
       "geometry",
-      if (targetOS == OS.macOS && buildMode == BuildMode.debug) ...["matdbg", "fgviewer"],
+      // Debug builds of Filament enable the Material Debug Server and Frame
+      // Graph viewer (build.sh -d/-t -> FILAMENT_ENABLE_MATDBG/FGVIEWER), so
+      // the debug zips for desktop (macOS/Linux) and Android ship
+      // libmatdbg.a/libfgviewer.a and their filament archives reference them
+      // (e.g. filament::matdbg::DebugServer). Without these the debug shared
+      // library keeps undefined matdbg/fgviewer symbols and dlopen fails at
+      // runtime, just like the perfetto case above. iOS debug never enables
+      // them (its cmake invocation passes neither option); Windows links
+      // libraries via #pragma comment(lib) in ThermionWin32.h instead.
+      if ({OS.macOS, OS.android}.contains(targetOS) && buildMode == BuildMode.debug) ...["matdbg", "fgviewer"],
     ];
+
+    // Keep Linux's matdbg/fgviewer archives separate from the main list. This
+    // was originally required to keep them outside a whole-archive group:
+    // both archives bundle civetweb, and force-loading both produces duplicate
+    // mg_* definitions. They now use normal archive semantics in `libraries`
+    // below, which extracts only the members needed by Filament. See the-c8d3.
+    final linuxDebugLibs = (targetOS == OS.linux && buildMode == BuildMode.debug) ? ["matdbg", "fgviewer"] : <String>[];
 
     if (targetOS == OS.windows) {
       // we just need the libDir and don't need to explicitly link the actual libs
       // (these are linked via ThermionWin32.h)
-      libDir =
-          Directory(libDir).uri.toFilePath(windows: targetOS == OS.windows);
+      libDir = Directory(libDir).uri.toFilePath(windows: targetOS == OS.windows);
     }
-
-    final defines = <String, String?>{};
 
     if ((input.userDefines["tracing"] as String?)?.isNotEmpty == true) {
       logger.info("Enabling tracing");
       defines["ENABLE_TRACING"] = "1";
     }
 
-    // Check for plugin configuration
+    // Check for plugin configuration. Plugin sources are compiled directly
+    // into libthermion_dart and can call RegisterPlugin during initialization.
+    // Prebuilt libraries currently use ordinary linker semantics; static
+    // archives whose only effect is an automatic RegisterPlugin initializer
+    // are not supported yet. Supporting those in future may require a scoped
+    // --whole-archive group (or an explicit referenced registration symbol),
+    // rather than force-loading every Thermion/Filament dependency.
     final pluginConfigs = input.userDefines["plugins"] as List<dynamic>?;
 
     logger.info("Defines : ${defines}");
 
     final flags = <String>[]; //"-fsanitize=address"];
 
-
-    // Collect include directories including plugin includes
-    // Use debug or release Filament headers based on build mode
-    // Headers are under filament/debug or filament/release so includes like <filament/SomeHeader.h> work
-    final filamentIncludeDir = ['native/include/filament', buildMode == BuildMode.debug
-        ? 
-          'native/include/filament/debug' : 'native/include/filament/release'];
-    final includeDirs = <String>[
-      'native/include',
-      ...filamentIncludeDir,
-    ];
+    // Include directories:
+    //  - `native/include`     : Thermion's OWN headers (c_api/, components/,
+    //                           ...) still committed in-tree.
+    //  - `artifactIncludeRel` : the Filament C++ headers, sourced from the
+    //                           version-matched R2 artifact extracted by
+    //                           getLibDir() (under .dart_tool/.../include).
+    //                           This replaces a hand-committed Filament header
+    //                           tree that drifted out of sync with the linked
+    //                           libraries on version bumps. `<filament/...>`,
+    //                           `<utils/...>`, `<backend/...>` and
+    //                           `<gltfio/materials/uberarchive.h>` all resolve
+    //                           from this flat root.
+    final includeDirs = <String>['native/include', artifactIncludeRel];
 
     // Process plugins after flags and includeDirs are declared
     if (pluginConfigs != null && consumingPackageRoot != null) {
-      await _processDeclarativePlugins(pluginConfigs, sources, libs, defines,
-          flags, includeDirs, targetOS, logger, consumingPackageRoot);
+      await _processDeclarativePlugins(
+        pluginConfigs,
+        sources,
+        libs,
+        defines,
+        flags,
+        includeDirs,
+        targetOS,
+        logger,
+        consumingPackageRoot,
+      );
     }
 
-    // Process materials configuration
-    final materialConfigs = input.userDefines["materials"] as Map<String, dynamic>?;
+    // Process materials configuration. Strip the "backends" key (consumed by
+    // resolveMaterialBackend above) so it isn't treated as a material name.
+    // An empty remainder means "no selective config" — pass null so
+    // _processMaterials includes all materials (a map, even empty, means
+    // "only materials explicitly set to true").
+    Map<String, dynamic>? materialConfigs;
+    if (rawMaterialsDefine is Map<String, dynamic>) {
+      final stripped = Map<String, dynamic>.from(rawMaterialsDefine)..remove("backends");
+      materialConfigs = stripped.isEmpty ? null : stripped;
+    }
     _processMaterials(materialConfigs, materialSources, sources, defines, logger, pkgRootFilePath);
 
     var frameworks = [];
@@ -195,44 +369,42 @@ outputDirectory : ${outputDirectory.path}
         "/std:c++20",
         if (buildMode == BuildMode.debug) ...["/MDd", "/Zi"],
         if (buildMode == BuildMode.release) "/MD",
-        "/VERBOSE",
-        ...defines.keys.map((k) => "/D$k=${defines[k]}").toList()
+        // /VERBOSE is a linker option, not a compiler one — cl.exe parses it
+        // as the deprecated /V<string> and emits warning D9035. If the
+        // verbose link map is ever needed for diagnostics, pass it after
+        // native_toolchain_c's own /link separator (see libraryDirectories
+        // / linkerOptions paths in run_cbuilder.dart).
+        ...defines.keys.map((k) => "/D$k=${defines[k]}").toList(),
       ]);
     }
 
     if (targetOS == OS.iOS) {
-      frameworks.addAll([
-        'Foundation',
-        'CoreGraphics',
-        'QuartzCore',
-        'GLKit',
-        "Metal",
-        'CoreVideo',
-        'OpenGLES'
-      ]);
+      frameworks.addAll(['Foundation', 'CoreGraphics', 'QuartzCore', 'GLKit', "Metal", 'CoreVideo', 'OpenGLES']);
     } else if (targetOS == OS.macOS) {
-      frameworks.addAll([
-        'Foundation',
-        'CoreVideo',
-        'Cocoa',
-        'Metal',
-        'QuartzCore',
-      ]);
+      frameworks.addAll(['Foundation', 'CoreVideo', 'Cocoa', 'Metal', 'QuartzCore']);
 
       libs.addAll(["bluegl", "bluevk"]);
     } else if (targetOS == OS.android) {
+      final versionScript = File(path.join(pkgRootFilePath, "native", "android", "thermion_dart.map"));
+      output.dependencies.add(versionScript.uri);
+
       libs.addAll(["GLESv3", "EGL", "bluevk", "dl", "android"]);
-      flags.add("-Wl,-z,max-page-size=16384");
+      flags.addAll([
+        "-Wl,-z,max-page-size=16384",
+        "-fvisibility=hidden",
+        // All static archives are implementation details of
+        // libthermion_dart.so. The version script retains only C entrypoints
+        // explicitly marked with default visibility.
+        "-Wl,--exclude-libs,ALL",
+        "-Wl,--version-script=${versionScript.path}",
+      ]);
     } else if (targetOS == OS.linux) {
-      libs.addAll(["bluevk", "bluegl"]);
+      libs.addAll(["bluevk", "bluegl", "drm", "EGL", "GL", "gbm"]);
+      flags.add("-I/usr/include/libdrm");
     }
 
-    if ({OS.linux, OS.macOS}.contains(targetOS) &&
-        buildMode == BuildMode.debug) {
-      flags.addAll([
-        "-g",
-        "-O0",
-      ]);
+    if ({OS.linux, OS.macOS}.contains(targetOS) && buildMode == BuildMode.debug) {
+      flags.addAll(["-g", "-O0"]);
     }
 
     if (targetOS == OS.linux) {
@@ -254,23 +426,26 @@ outputDirectory : ${outputDirectory.path}
       final isSimulator = config.code.iOS.targetSdk == IOSSdk.iPhoneSimulator;
       final sdkName = isSimulator ? 'iphonesimulator' : 'iphoneos';
       final sdkPath = (await Process.run('xcrun', ['--sdk', sdkName, '--show-sdk-path'])).stdout.toString().trim();
-      final targetTriple = isSimulator
-          ? '$archStr-apple-ios-simulator'
-          : '$archStr-apple-ios';
+      final targetTriple = isSimulator ? '$archStr-apple-ios-simulator' : '$archStr-apple-ios';
 
       for (final objcSource in objcSources) {
         final objFile = path.join(Directory.systemTemp.path, '${path.basenameWithoutExtension(objcSource)}.o');
         final result = await Process.run(cc, [
-          '-x', 'objective-c',
-          '-target', targetTriple,
+          '-x',
+          'objective-c',
+          '-target',
+          targetTriple,
           '-mios-version-min=13.0',
-          '-isysroot', sdkPath,
+          '-isysroot',
+          sdkPath,
           '-fPIC',
           '-fobjc-arc',
           '-O3',
           ...includeDirs.map((d) => '-I${path.join(pkgRootFilePath, d)}'),
-          '-c', objcSource,
-          '-o', objFile,
+          '-c',
+          objcSource,
+          '-o',
+          objFile,
         ]);
         if (result.exitCode != 0) {
           logger.severe('Failed to compile ObjC source $objcSource:\n${result.stderr}');
@@ -295,14 +470,16 @@ outputDirectory : ${outputDirectory.path}
       }
     }
 
-    var srcs = File(Directory.systemTemp.path +
-        Platform.pathSeparator +
-        "thermion_sources.rsp");
+    var srcs = File(Directory.systemTemp.path + Platform.pathSeparator + "thermion_sources.rsp");
     srcs.writeAsStringSync(sources.join("\n"));
 
     final cbuilder = CBuilder.library(
       name: packageName,
       language: Language.cpp,
+      // All of Thermion's C++ code, including the prebuilt Filament archives,
+      // is linked into this one shared library on Android. Keep libc++ in that
+      // library rather than shipping a separate libc++_shared.so code asset.
+      cppLinkStdLib: targetOS == OS.android ? 'c++_static' : null,
       assetName: 'thermion_dart.dart',
       sources: targetOS == OS.windows ? [] : sources,
       includes: platform == "windows" ? [] : includeDirs,
@@ -313,145 +490,91 @@ outputDirectory : ${outputDirectory.path}
         if (objcObjectFiles.isNotEmpty) ...['-lthermion_objc', '-L${Directory.systemTemp.path}'],
         ...flags,
         ...frameworks,
-        if (targetOS == OS.linux) ...["-Wl,--whole-archive"],
-        if (targetOS != OS.windows) ...[
+        // Keep every non-Linux link command unchanged. GNU ld processes
+        // static archives from left to right, and CBuilder emits flags before
+        // the source files, so Linux archives use `libraries` below instead.
+        if (targetOS != OS.windows && targetOS != OS.linux) ...[
           ...libs.map((lib) => "-l$lib"),
-          if (targetOS == OS.linux) ...[
-            "-Wl,--no-whole-archive",
-            '-lGL',
-            '-lEGL',
-          ] else ...[
-            "-lc++",
-            ""
-          ],
-          "-L$libDir"
+          if (targetOS != OS.android) ...["-lc++", ""],
+          "-L$libDir",
         ],
-        if (targetOS == OS.linux)
-          '-Wl,--no-as-needed'
-        else if (targetOS != OS.windows)
+        if (targetOS == OS.linux) "-L$libDir",
+        if (targetOS == OS.linux) ...[
+          '-Wl,--no-as-needed',
+          // Shared-library links normally permit unresolved symbols. Make
+          // Linux fail at link time instead of deferring the error to
+          // dlopen, where missing archive dependencies are harder to trace.
+          '-Wl,-z,defs',
+        ] else if (targetOS != OS.windows && targetOS != OS.android)
           '-lc++',
         if (platform == "windows") ...[
-          "/I${path.join(pkgRootFilePath, "native", "include")}",
-          ...filamentIncludeDir.map((d) => "/I${path.join(pkgRootFilePath, d)}"),
-          "/I${path.join(pkgRootFilePath, "native", "include", "windows", "vulkan")}",
+          ...includeDirs.map((d) => "/I${path.join(pkgRootFilePath, d)}"),
           "@${srcs.uri.toFilePath(windows: true)}",
-          // ...sources,
-          // '/link',
-          // "/LIBPATH:$libDir",
-          // '/DLL',
-        ]
+          // Library inputs (filament.lib, backend.lib, bluevk.lib, etc.)
+          // are declared via #pragma comment(lib, ...) directives in
+          // native/include/ThermionWin32.h, which is transitively included
+          // by the c_api headers and the Windows vulkan/d3d sources. The
+          // linker only needs to know WHERE to find those .lib files —
+          // that is wired via `libraryDirectories: [libDir]` below, which
+          // native_toolchain_c emits after its own /link separator
+          // (run_cbuilder.dart). Adding a second /link here puts cl.exe's
+          // auto-generated /LD and /Fe: AFTER our separator, where LINK
+          // ignores them as LNK4044 — the resulting binary has no /DLL
+          // and no entry point, failing with LNK1561.
+        ],
       ],
       libraryDirectories: [libDir],
+      // CBuilder emits libraries after the source files. This lets GNU ld
+      // extract only referenced archive members instead of forcing every
+      // member into libthermion_dart.so with --whole-archive. Keep the full
+      // existing library set; the second pass resolves Filament's circular
+      // archive references. GL, EGL, and libm also belong after the objects
+      // so --as-needed cannot discard them prematurely.
+      libraries: targetOS == OS.linux
+          ? [...libs, ...linuxDebugLibs, 'GL', 'EGL', ...libs, ...linuxDebugLibs, 'm']
+          : const [],
     );
 
-    await cbuilder.run(
-      input: input,
-      output: output,
-      logger: logger,
-    );
-    if (targetOS == OS.android) {
-      final archExtension = switch (targetArchitecture) {
-        Architecture.arm => "arm-linux-androideabi",
-        Architecture.arm64 => "aarch64-linux-android",
-        Architecture.x64 => "x86_64-linux-android",
-        Architecture.ia32 => "i686-linux-android",
-        _ => throw FormatException('Invalid')
-      };
+    await cbuilder.run(input: input, output: output, logger: logger);
 
-      var compilerPath = config.code.cCompiler!.compiler.path;
-
-      if (Platform.isWindows && compilerPath.startsWith("/")) {
-        compilerPath = compilerPath.substring(1);
-      }
-
-      var ndkRoot = File(compilerPath)
-          .parent
-          .parent
-          .uri
-          .toFilePath(windows: Platform.isWindows);
-
-      var stlPath = File([
-        ndkRoot,
-        "sysroot",
-        "usr",
-        "lib",
-        archExtension,
-        "libc++_shared.so"
-      ].join(Platform.pathSeparator));
-      final libcpp = CodeAsset(
-        package: "thermion_dart",
-        name: "libc++_shared.so",
-        linkMode: DynamicLoadingBundled(),
-        file: stlPath.uri,
-      );
-
-      output.assets.addEncodedAsset(libcpp.encode());
-    }
-        
-    output.metadata.addAll({"includeDirs":includeDirs.map((dir) => path.join(pkgRootFilePath,dir)).toList()});
-    output.metadata.addAll({"outputDir":outputDirectory.path});
-   
+    output.metadata.addAll({"includeDirs": includeDirs.map((dir) => path.join(pkgRootFilePath, dir)).toList()});
+    output.metadata.addAll({"outputDir": outputDirectory.path});
 
     if (targetOS == OS.windows) {
-      var importLib = File(path.join(
-          outputDirectory.path.substring(1).replaceAll("/", "\\"),
-          "thermion_dart.lib"));
+      var importLib = File(path.join(outputDirectory.path.substring(1).replaceAll("/", "\\"), "thermion_dart.lib"));
 
-      output.assets.code.add(CodeAsset(
-        package: packageName,
-        name: "thermion_dart.lib",
-        linkMode: DynamicLoadingBundled(),
-        file: importLib.uri,
-      ));
-
-      for (final dir in ["windows/vulkan"]) {
-        // , "filament/bluevk", "filament/vulkan"
-        final targetSubdir =
-            path.join(outputDirectory.path, "include", dir).substring(1);
-        if (!Directory(targetSubdir).existsSync()) {
-          Directory(targetSubdir).createSync(recursive: true);
-        }
-
-        for (var file
-            in Directory(path.join(pkgRootFilePath, "native", "include", dir))
-                .listSync()) {
-          if (file is File) {
-            final targetPath =
-                path.join(targetSubdir, path.basename(file.path));
-            file.copySync(targetPath);
-            final include = CodeAsset(
-              package: packageName,
-              name: "include/$dir/${path.basename(file.path)}",
-              linkMode: DynamicLoadingBundled(),
-              file: file.uri,
-            );
-            output.assets.addEncodedAsset(include.encode());
-          }
-        }
-      }
+      output.assets.code.add(
+        CodeAsset(
+          package: packageName,
+          name: "thermion_dart.lib",
+          linkMode: DynamicLoadingBundled(),
+          file: importLib.uri,
+        ),
+      );
     }
   });
 }
 
-
-
-String _getFilamentVersion() {
-  final versionFile = File(path.join(
-    path.dirname(path.dirname(Platform.script.toFilePath(windows: Platform.isWindows))),
-    'filament.version'
-  ));
+// filament.version lives at the repo root (the parent of this package). We
+// can't derive that from `Platform.script`: when this hook runs as a *compiled
+// build hook* the script URI points at the consuming package's
+// `.dart_tool/hooks_runner/.../hook.dill`, not at this source file, so the old
+// `dirname(dirname(script))` computation landed inside the wrong package and
+// the file was never found (bare `throw Exception()`). Resolve it relative to
+// the package root that getLibDir already has instead.
+String _getFilamentVersion(Uri packageRoot) {
+  final pkgPath = packageRoot.toFilePath(windows: Platform.isWindows);
+  final versionFile = File(path.join(path.dirname(pkgPath), 'filament.version'));
   if (versionFile.existsSync()) {
     final parts = versionFile.readAsStringSync().trim().split(RegExp(r'\s+'));
     // Format: "<repo> <version>" - return the version (second field)
     return parts.length >= 2 ? parts[1] : parts[0];
   }
-  // Fallback to hardcoded version if file doesn't exist
-  return "v1.69.1";
+  throw Exception('filament.version not found at ${versionFile.path}');
 }
 
-String _FILAMENT_VERSION = _getFilamentVersion();
-String _getLibraryUrl(String platform, String mode) {
-  return "https://pub-c8b6266320924116aaddce03b5313c0a.r2.dev/filament-${_FILAMENT_VERSION}-${platform}-${mode}.zip";
+String _getLibraryUrl(String version, String platform, String mode) {
+  return "https://pub-c8b6266320924116aaddce03b5313c0a.r2.dev/filament-${version}-${platform}-${mode}.zip";
 }
 
 const _maxRetries = 3;
@@ -507,10 +630,22 @@ Future<void> _downloadWithRetry(
 //
 // Download precompiled Filament libraries for the target platform from Cloudflare.
 //
-Future<Directory> getLibDir(Uri packageRoot, OS targetOS,
-    Architecture targetArchitecture, Logger logger, BuildMode buildMode,
-    {bool isIOSSimulator = false}) async {
+// The downloaded zip also contains a complete, version-matched Filament header tree
+// under `include/`, which is extracted alongside the libraries. We return that include
+// directory so consumers compile against headers that always match the linked
+// libraries (rather than a hand-committed tree that drifts on version bumps).
+//
+Future<({Directory libDir, Directory includeDir})> getLibDir(
+  Uri packageRoot,
+  OS targetOS,
+  Architecture targetArchitecture,
+  Logger logger,
+  BuildMode buildMode, {
+  bool isIOSSimulator = false,
+}) async {
   var platform = targetOS.toString().toLowerCase();
+
+  final version = _getFilamentVersion(packageRoot);
 
   // Use separate library directory for iOS simulator (arm64 simulator
   // libraries can't be lipo'd with arm64 device libraries).
@@ -520,14 +655,17 @@ Future<Directory> getLibDir(Uri packageRoot, OS targetOS,
 
   var mode = buildMode == BuildMode.debug ? "debug" : "release";
 
-  var libDir = Directory(path.join(
+  var libDir = Directory(
+    path.join(
       packageRoot.toFilePath(windows: Platform.isWindows),
       ".dart_tool",
       "thermion_dart",
       "lib",
-      _FILAMENT_VERSION,
+      version,
       platform,
-      mode));
+      mode,
+    ),
+  );
 
   if (platform == "android") {
     final archExtension = switch (targetArchitecture) {
@@ -535,26 +673,35 @@ Future<Directory> getLibDir(Uri packageRoot, OS targetOS,
       Architecture.arm64 => "arm64-v8a",
       Architecture.x64 => "x86_64",
       Architecture.ia32 => "x86",
-      _ => throw FormatException('Invalid')
+      _ => throw FormatException('Invalid'),
     };
     libDir = Directory(path.join(libDir.path, archExtension));
   } else if (platform == "windows") {
     if (targetArchitecture != Architecture.x64) {
       throw Exception("Unsupported architecture : ${targetArchitecture}");
     }
+  } else if (platform == "linux") {
+    // Linux x64 keeps the legacy zip URL + cache dir. arm64 consumers fetch
+    // the arch-suffixed zip (filament-<v>-linux-arm64-<mode>.zip) and use an
+    // arch-scoped cache dir so the two never collide.
+    if (targetArchitecture == Architecture.arm64) {
+      platform = "linux-arm64";
+      libDir = Directory(path.join(libDir.path, "arm64"));
+    } else if (targetArchitecture != Architecture.x64) {
+      throw Exception("Unsupported architecture for Linux: ${targetArchitecture}");
+    }
   }
 
   logger.info("Searching for Filament libraries under ${libDir.path}");
 
-  var url = _getLibraryUrl(platform, mode);
+  var url = _getLibraryUrl(version, platform, mode);
 
   final filename = url.split("/").last;
 
   // We will write an empty file called success to the unzip directory after successfully downloading/extracting the prebuilt libraries.
   // If this file already exists, we assume everything has been successfully extracted and skip
   final unzipDir = platform == "android" ? libDir.parent.path : libDir.path;
-  final successToken = File(path.join(
-      unzipDir, "success"));
+  final successToken = File(path.join(unzipDir, "success"));
   final libraryZip = File(path.join(unzipDir, filename));
 
   if (libraryZip.existsSync()) {
@@ -579,7 +726,9 @@ Future<Directory> getLibDir(Uri packageRoot, OS targetOS,
 
     final downloadedBytes = await libraryZip.readAsBytes();
     final downloadedHash = md5.convert(downloadedBytes);
-    logger.info("Downloaded library zip hash: $downloadedHash, size: ${downloadedBytes.length} bytes (${libraryZip.path})");
+    logger.info(
+      "Downloaded library zip hash: $downloadedHash, size: ${downloadedBytes.length} bytes (${libraryZip.path})",
+    );
 
     final archive = ZipDecoder().decodeBytes(downloadedBytes);
 
@@ -597,7 +746,178 @@ Future<Directory> getLibDir(Uri packageRoot, OS targetOS,
     }
     successToken.writeAsStringSync("SUCCESS");
   }
-  return libDir;
+
+  // Some published debug artifacts (e.g. the v1.75.0 linux debug zip) were
+  // built by a script bug that copied the bluevk headers into the *release*
+  // target dir, so their include/ tree lacks bluevk/, vulkan/ and vk_video/
+  // and any compile of <bluevk/BlueVK.h> fails (LinuxVulkanContext/
+  // LinuxVulkanUtils under native/include/vulkan/linux/). Those headers are
+  // build-mode-independent, so heal the cache by merging them in from the
+  // release artifact of the same version. Checked outside the success-token
+  // guard above so caches extracted from an already-broken zip are repaired
+  // too. No-op once the artifact is re-uploaded with the headers present.
+  // See the-c8d3.
+  if (targetOS != OS.iOS && !File(path.join(unzipDir, 'include', 'bluevk', 'BlueVK.h')).existsSync()) {
+    logger.warning(
+      "include/bluevk/BlueVK.h is missing from the $platform/$mode artifact; "
+      "fetching bluevk headers from the release artifact to repair the cache",
+    );
+    final releaseUrl = _getLibraryUrl(version, platform, "release");
+    final releaseZip = File(
+      path.join(Directory.systemTemp.path, 'thermion_bluevk_repair_${path.basename(releaseUrl)}'),
+    );
+    final releaseRequest = await HttpClient().getUrl(Uri.parse(releaseUrl));
+    final releaseResponse = await releaseRequest.close();
+    if (releaseResponse.statusCode != 200) {
+      throw Exception("Release libraries not found at $releaseUrl (needed for missing bluevk headers)");
+    }
+    await releaseResponse.pipe(releaseZip.openWrite());
+    final releaseArchive = ZipDecoder().decodeBytes(await releaseZip.readAsBytes());
+    for (final file in releaseArchive) {
+      if (!file.isFile) continue;
+      final name = file.name;
+      if (name.startsWith('include/bluevk/') ||
+          name.startsWith('include/vulkan/') ||
+          name.startsWith('include/vk_video/')) {
+        final f = File(path.join(unzipDir, name));
+        await f.create(recursive: true);
+        await f.writeAsBytes(file.content as List<int>);
+      }
+    }
+    await releaseZip.delete();
+    logger.warning("Repaired include/ with bluevk headers from $releaseUrl");
+  }
+  // The entire zip (libraries AND the `include/` header tree) is extracted to
+  // `unzipDir`; for Android the per-arch libs live in a subdir but headers are
+  // shared at the extraction root.
+  return (libDir: libDir, includeDir: Directory(path.join(unzipDir, 'include')));
+}
+
+const _webR2BaseUrl = 'https://pub-c8b6266320924116aaddce03b5313c0a.r2.dev';
+
+Future<void> _downloadWebArtifacts(BuildInput input, Logger logger) async {
+  final packageRoot = input.packageRoot.toFilePath(windows: Platform.isWindows);
+
+  // Local-build override: skip the R2 download and copy from the emscripten
+  // build output instead. Set `web_local: true` under
+  // `hooks.user_defines.thermion_dart` in the consuming app's pubspec.yaml
+  // when iterating on native C++ that needs to ship to web.
+  final webLocal = input.userDefines["web_local"];
+  if (webLocal == true || webLocal == "true" || webLocal == 1 || webLocal == "1") {
+    final localOut = Directory(path.join(packageRoot, 'native', 'web', 'build', 'build', 'out'));
+    if (!localOut.existsSync()) {
+      logger.warning(
+        'web_local: true set but ${localOut.path} does not exist; '
+        'build the web target first, then re-run.',
+      );
+      return;
+    }
+    final consumingPackageRoot = _extractConsumingPackageRoot(input.outputDirectory.toString(), logger);
+    if (consumingPackageRoot == null) {
+      logger.warning('Could not determine consuming package root');
+      return;
+    }
+    final webDir = Directory(path.join(consumingPackageRoot, 'web'));
+    if (!webDir.existsSync()) {
+      logger.info('No web/ directory at ${webDir.path}; skipping');
+      return;
+    }
+    for (final name in ['thermion_dart.js', 'thermion_dart.wasm']) {
+      final src = File(path.join(localOut.path, name));
+      if (!src.existsSync()) {
+        logger.warning('$name not found in ${localOut.path}');
+        continue;
+      }
+      src.copySync(path.join(webDir.path, name));
+      logger.info('[web_local] Copied $name from ${localOut.path}');
+    }
+    return;
+  }
+
+  final versionFile = File(path.join(packageRoot, 'native', 'web', 'web.version'));
+  if (!versionFile.existsSync()) {
+    logger.warning('web.version not found at ${versionFile.path}; skipping web artifact download');
+    return;
+  }
+  final version = versionFile.readAsStringSync().trim();
+  if (version.isEmpty || version == 'pending') {
+    logger.warning('web.version contains "$version"; skipping download (CI may not have uploaded yet)');
+    return;
+  }
+  logger.info('Web artifact version: $version');
+
+  final consumingPackageRoot = _extractConsumingPackageRoot(input.outputDirectory.toString(), logger);
+  if (consumingPackageRoot == null) {
+    logger.warning('Could not determine consuming package root; skipping web artifact copy');
+    return;
+  }
+
+  final cacheDir = Directory(path.join(packageRoot, '.dart_tool', 'thermion_dart', 'web', version));
+
+  try {
+    await _fetchWebZip(version, cacheDir, logger);
+  } catch (e) {
+    logger.warning('Failed to download web artifacts: $e');
+    return;
+  }
+
+  final webDir = Directory(path.join(consumingPackageRoot, 'web'));
+  if (!webDir.existsSync()) {
+    logger.info('No web/ directory at ${webDir.path}; skipping artifact copy');
+    return;
+  }
+  for (final name in ['thermion_dart.js', 'thermion_dart.wasm']) {
+    final src = File(path.join(cacheDir.path, name));
+    if (!src.existsSync()) {
+      logger.warning('$name not found in cache ${cacheDir.path}');
+      continue;
+    }
+    final dest = File(path.join(webDir.path, name));
+    src.copySync(dest.path);
+    logger.info('Copied $name to ${dest.path}');
+  }
+}
+
+Future<void> _fetchWebZip(String version, Directory cacheDir, Logger logger) async {
+  final successToken = File(path.join(cacheDir.path, 'success'));
+  if (successToken.existsSync()) {
+    logger.info('Web artifacts already cached at ${cacheDir.path}');
+    return;
+  }
+
+  if (!cacheDir.existsSync()) {
+    cacheDir.createSync(recursive: true);
+  }
+
+  final zipName = 'thermion_dart-$version-web.zip';
+  final url = '$_webR2BaseUrl/$zipName';
+  final zipFile = File(path.join(cacheDir.path, zipName));
+
+  logger.info('Downloading $url');
+  final request = await HttpClient().getUrl(Uri.parse(url));
+  final response = await request.close();
+
+  if (response.statusCode != 200) {
+    throw Exception('HTTP ${response.statusCode} fetching $url');
+  }
+
+  await response.pipe(zipFile.openWrite());
+  final bytes = await zipFile.readAsBytes();
+
+  final archive = ZipDecoder().decodeBytes(bytes);
+  for (final file in archive) {
+    final filePath = path.join(cacheDir.path, file.name);
+    if (file.isFile) {
+      final f = File(filePath);
+      await f.create(recursive: true);
+      await f.writeAsBytes(file.content as List<int>);
+    } else {
+      await Directory(filePath).create(recursive: true);
+    }
+  }
+
+  successToken.writeAsStringSync('SUCCESS');
+  logger.info('Extracted web artifacts to ${cacheDir.path}');
 }
 
 //
@@ -610,8 +930,7 @@ String? _extractConsumingPackageRoot(String outputDirUri, Logger logger) {
     final uri = Uri.parse(outputDirUri);
     final outputPath = uri.toFilePath();
 
-    logger.info(
-        "Extracting consuming package root from output directory: $outputPath");
+    logger.info("Extracting consuming package root from output directory: $outputPath");
 
     // Navigate up the directory tree to find the consuming package root
     // The path typically looks like: /path/to/consuming_package/.dart_tool/hooks_runner/shared/thermion_dart/build/hash/
@@ -661,8 +980,7 @@ Future<void> _processDeclarativePlugins(
 ) async {
   for (final pluginConfig in pluginConfigs) {
     if (pluginConfig is! Map<String, dynamic>) {
-      logger.warning(
-          "Invalid plugin configuration, expected Map but got ${pluginConfig.runtimeType}");
+      logger.warning("Invalid plugin configuration, expected Map but got ${pluginConfig.runtimeType}");
       continue;
     }
 
@@ -699,12 +1017,10 @@ Future<void> _processDeclarativePlugins(
     }
 
     // Process library directories (as -L flags)
-    final pluginLibraryDirs =
-        pluginConfig['library_dirs'] as Map<String, dynamic>?;
+    final pluginLibraryDirs = pluginConfig['library_dirs'] as Map<String, dynamic>?;
     if (pluginLibraryDirs != null) {
       final targetOSString = targetOS.toString().split('.').last;
-      final platformLibraryDirs =
-          pluginLibraryDirs[targetOSString] as List<dynamic>?;
+      final platformLibraryDirs = pluginLibraryDirs[targetOSString] as List<dynamic>?;
       if (platformLibraryDirs != null) {
         for (final libraryDir in platformLibraryDirs) {
           if (libraryDir is String) {
@@ -716,9 +1032,11 @@ Future<void> _processDeclarativePlugins(
       }
     }
 
-    // Process link libraries (as -l flags)
-    final pluginLinkLibraries =
-        pluginConfig['link_libraries'] as List<dynamic>?;
+    // Process link libraries (as -l flags). These are ordinary dependencies,
+    // not force-loaded static plugins. If static self-registering plugins are
+    // supported in future, their archives may need a narrowly scoped
+    // --whole-archive/--no-whole-archive pair so their initializers are kept.
+    final pluginLinkLibraries = pluginConfig['link_libraries'] as List<dynamic>?;
     if (pluginLinkLibraries != null) {
       for (final library in pluginLinkLibraries) {
         if (library is String) {
@@ -745,8 +1063,7 @@ Future<void> _processDeclarativePlugins(
     }
 
     // Process compile options
-    final pluginCompileOptions =
-        pluginConfig['compile_options'] as List<dynamic>?;
+    final pluginCompileOptions = pluginConfig['compile_options'] as List<dynamic>?;
     if (pluginCompileOptions != null) {
       for (final option in pluginCompileOptions) {
         if (option is String) {
@@ -779,8 +1096,7 @@ void _processMaterials(
   if (materialConfig == null) {
     logger.info("No materials config specified, including all materials");
     for (final materialName in materialSources.keys) {
-      _includeMaterial(materialName, materialSources, sources, defines, logger,
-          pkgRootFilePath);
+      _includeMaterial(materialName, materialSources, sources, defines, logger, pkgRootFilePath);
     }
     return;
   }
@@ -792,8 +1108,7 @@ void _processMaterials(
 
     if (shouldInclude == true) {
       if (materialSources.containsKey(materialName)) {
-        _includeMaterial(materialName, materialSources, sources, defines,
-            logger, pkgRootFilePath);
+        _includeMaterial(materialName, materialSources, sources, defines, logger, pkgRootFilePath);
       } else {
         logger.warning("Unknown material: $materialName");
       }

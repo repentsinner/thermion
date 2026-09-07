@@ -7,7 +7,7 @@
 #include "c_api/TEngine.h"
 
 #include <filament/Camera.h>
-#include <filament/backend/DriverEnums.h>
+#include <backend/DriverEnums.h>
 #include <filament/DebugRegistry.h>
 #include <filament/Engine.h>
 #include <filament/Fence.h>
@@ -28,8 +28,6 @@
 #include <gltfio/math.h>
 #include <gltfio/materials/uberarchive.h>
 
-#include <imageio/ImageDecoder.h>
-#include <imageio/ImageEncoder.h>
 #include <image/ColorTransform.h>
 
 #include <utils/EntityManager.h>
@@ -44,6 +42,12 @@ namespace thermion
     extern "C"
     {
         using namespace filament;
+
+        // Defined in ThermionDartRenderThreadApi.cpp. Direct-API getters use
+        // these to record which render thread owns an engine-scoped object
+        // (and which canvas the active thread's engine renders to).
+        void RenderThread_registerOwnerFromOwner(void *owner, void *knownOwner);
+        const char *RenderThread_getActiveCanvasSelector();
 #endif
 
         EMSCRIPTEN_KEEPALIVE uint64_t TSWAP_CHAIN_CONFIG_TRANSPARENT = filament::backend::SWAP_CHAIN_CONFIG_TRANSPARENT;
@@ -59,20 +63,27 @@ namespace thermion
             bool disableHandleUseAfterFreeCheck)
         {
             #ifdef __EMSCRIPTEN__
-            auto handle = Thermion_createGLContext();
+            // Engine_create runs inside the engine's RenderThread task, so the
+            // active thread IS this engine's thread — create the WebGL context
+            // on the canvas that was transferred to it.
+            auto handle = Thermion_createGLContext(RenderThread_getActiveCanvasSelector());
             tSharedContext = (void*)handle;
             tPlatform = (backend::Platform *)new filament::backend::PlatformWebGL();
             #endif
             filament::Engine::Config config;
             config.stereoscopicEyeCount = stereoscopicEyeCount;
             config.disableHandleUseAfterFreeCheck = disableHandleUseAfterFreeCheck;
+
             auto *platform = reinterpret_cast<filament::backend::Platform *>(tPlatform);
-            auto *engine = filament::Engine::create(
-                static_cast<filament::Engine::Backend>(backend),
-                platform,
-                tSharedContext,
-                &config
-            );
+                  
+            auto *engine = filament::Engine::Builder()
+                .backend(static_cast<filament::Engine::Backend>(backend))
+                .platform(platform)
+                .featureLevel(filament::Engine::FeatureLevel::FEATURE_LEVEL_1)
+                .sharedContext(tSharedContext)
+                .config(&config)
+                .build();
+            
             return reinterpret_cast<TEngine *>(engine);
         }
 
@@ -102,6 +113,13 @@ namespace thermion
             auto *engine = reinterpret_cast<Engine *>(tEngine);
             auto *renderer = engine->createRenderer();
             return reinterpret_cast<TRenderer *>(renderer);
+        }
+
+        EMSCRIPTEN_KEEPALIVE void Engine_destroyRenderer(TEngine *tEngine, TRenderer *tRenderer)
+        {
+            auto *engine = reinterpret_cast<Engine *>(tEngine);
+            auto *renderer = reinterpret_cast<Renderer *>(tRenderer);
+            engine->destroy(renderer);
         }
 
         EMSCRIPTEN_KEEPALIVE TSwapChain *Engine_createSwapChain(TEngine *tEngine, void *window, uint64_t flags)
@@ -183,6 +201,9 @@ namespace thermion
         {
             auto *engine = reinterpret_cast<Engine *>(tEngine);
             auto &transformManager = engine->getTransformManager();
+            // Direct-API getters run on the main thread; record which render
+            // thread owns this manager so RenderThread dispatch can route to it.
+            RenderThread_registerOwnerFromOwner(&transformManager, tEngine);
             return reinterpret_cast<TTransformManager *>(&transformManager);
         }
 
@@ -190,6 +211,7 @@ namespace thermion
         {
             auto *engine = reinterpret_cast<Engine *>(tEngine);
             auto &renderableManager = engine->getRenderableManager();
+            RenderThread_registerOwnerFromOwner(&renderableManager, tEngine);
             return reinterpret_cast<TRenderableManager *>(&renderableManager);
         }
 
@@ -203,6 +225,7 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE TEntityManager *Engine_getEntityManager(TEngine *tEngine) {
             auto *engine = reinterpret_cast<Engine *>(tEngine);
             auto &entityManager = engine->getEntityManager();
+            RenderThread_registerOwnerFromOwner(&entityManager, tEngine);
             return reinterpret_cast<TEntityManager *>(&entityManager);
         }
 
@@ -282,6 +305,14 @@ namespace thermion
         {
             auto *engine = reinterpret_cast<Engine *>(tEngine);
             auto *texture = reinterpret_cast<Texture *>(tTexture);
+            // Parent resources can release a texture as part of their queued
+            // destruction. Treat a later explicit release as idempotent;
+            // Engine::destroy on an invalid texture can raise inside the
+            // render-thread packaged_task and strand the Dart completion.
+            if (!engine->isValid(texture))
+            {
+                return;
+            }
             engine->destroy(texture);
         }
 
@@ -323,28 +354,45 @@ namespace thermion
         {
             auto *engine = reinterpret_cast<Engine *>(tEngine);
             auto *scene = engine->createScene();
+            RenderThread_registerOwnerFromOwner(scene, tEngine);
             return reinterpret_cast<TScene *>(scene);
         }
 
-        EMSCRIPTEN_KEEPALIVE TSkybox *Engine_buildSkybox(TEngine *tEngine, TTexture *tTexture)
+        EMSCRIPTEN_KEEPALIVE TSkybox *Engine_buildSkybox(TEngine *tEngine, TTexture *tTexture, bool showSun, float intensity, uint8_t priority)
         {
             auto *engine = reinterpret_cast<Engine *>(tEngine);
             auto *texture = reinterpret_cast<Texture *>(tTexture);
 
-            auto *skybox =
-                filament::Skybox::Builder()
-                    .environment(texture)
-                    .build(*engine);
+            auto skyboxBuilder = filament::Skybox::Builder();
+
+            if (texture)
+            {
+                skyboxBuilder.environment(texture);
+            }
+            skyboxBuilder.showSun(showSun);
+            if (intensity >= 0.0f)
+            {
+                skyboxBuilder.intensity(intensity);
+            }
+            skyboxBuilder.priority(priority);
+
+            auto *skybox = skyboxBuilder.build(*engine);
 
             return reinterpret_cast<TSkybox *>(skybox);
         }
 
-        EMSCRIPTEN_KEEPALIVE TSkybox *Engine_buildColoredSkybox(TEngine *tEngine, float r, float g, float b, float a)
+        EMSCRIPTEN_KEEPALIVE TSkybox *Engine_buildColoredSkybox(TEngine *tEngine, float r, float g, float b, float a, bool showSun, float intensity, uint8_t priority)
         {
             auto *engine = reinterpret_cast<Engine *>(tEngine);
-            auto *skybox = filament::Skybox::Builder()
+            auto skyboxBuilder = filament::Skybox::Builder()
                 .color({r, g, b, a})
-                .build(*engine);
+                .showSun(showSun)
+                .priority(priority);
+            if (intensity >= 0.0f)
+            {
+                skyboxBuilder.intensity(intensity);
+            }
+            auto *skybox = skyboxBuilder.build(*engine);
             return reinterpret_cast<TSkybox *>(skybox);
         }
 
@@ -394,6 +442,14 @@ namespace thermion
         EMSCRIPTEN_KEEPALIVE void Engine_destroySkybox(TEngine *tEngine, TSkybox *tSkybox) {
             auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
             auto *skybox = reinterpret_cast<filament::Skybox *>(tSkybox);
+            // Callers can destroy a caller-attached skybox themselves before
+            // the scene (or a viewer teardown that derives from the scene)
+            // releases it. Treat a later explicit release as idempotent, as
+            // Engine_destroyTexture does.
+            if (!engine->isValid(skybox))
+            {
+                return;
+            }
             if(skybox->getTexture()) {
                 engine->destroy(skybox->getTexture());
             }

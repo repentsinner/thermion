@@ -11,11 +11,10 @@ void main() async {
 
   test('create entity and set as parent', () async {
     await testHelper.withViewer((viewer) async {
-      final cube = await viewer
-          .createGeometry(GeometryHelper.cube(normals: false, uvs: false));
+      final cube = await viewer.createGeometry(GeometryUtils.cube(normals: false, uvs: false));
 
       await testHelper.capture(viewer.view, "create_entity_before_parent");
-      
+
       final entity = await FilamentApp.instance!.createEntity();
 
       await FilamentApp.instance!.setParent(cube.entity, entity);
@@ -23,30 +22,27 @@ void main() async {
       await FilamentApp.instance!.setTransform(entity, Matrix4.translation(Vector3.all(-1)));
 
       await testHelper.capture(viewer.view, "create_entity_after_parent");
-
     });
   });
 
   test('set/unset parent geometry', () async {
     await testHelper.withViewer((viewer) async {
-      var blueMaterialInstance =
-          await FilamentApp.instance!.createUnlitMaterialInstance();
+      var blueMaterialInstance = await FilamentApp.instance!.createUnlitMaterialInstance();
       final blueCube = await viewer.createGeometry(
-          GeometryHelper.cube(normals: false, uvs: false),
-          materialInstances: [blueMaterialInstance]);
-      await blueMaterialInstance.setParameterFloat4(
-          "baseColorFactor", 0.0, 0.0, 1.0, 1.0);
+        GeometryUtils.cube(normals: false, uvs: false),
+        materialInstances: [blueMaterialInstance],
+      );
+      await blueMaterialInstance.setParameterFloat4("baseColorFactor", 0.0, 0.0, 1.0, 1.0);
 
       // Position blue cube slightly behind and to the right
       await blueCube.setTransform(Matrix4.translation(Vector3(1.0, 0.0, -1.0)));
 
-      var greenMaterialInstance =
-          await FilamentApp.instance!.createUnlitMaterialInstance();
+      var greenMaterialInstance = await FilamentApp.instance!.createUnlitMaterialInstance();
       final greenCube = await viewer.createGeometry(
-          GeometryHelper.cube(normals: false, uvs: false),
-          materialInstances: [greenMaterialInstance]);
-      await greenMaterialInstance.setParameterFloat4(
-          "baseColorFactor", 0.0, 1.0, 0.0, 1.0);
+        GeometryUtils.cube(normals: false, uvs: false),
+        materialInstances: [greenMaterialInstance],
+      );
+      await greenMaterialInstance.setParameterFloat4("baseColorFactor", 0.0, 1.0, 0.0, 1.0);
 
       await viewer.addToScene(blueCube);
       await viewer.addToScene(greenCube);
@@ -71,14 +67,14 @@ void main() async {
 
       // Create a parent entity
       final parent = await FilamentApp.instance!.createEntity();
-      transformManager.createComponent(parent);
+      await transformManager.createComponent(parent);
 
       // Create several child entities
       final children = <ThermionEntity>[];
       for (int i = 0; i < 3; i++) {
         final child = await FilamentApp.instance!.createEntity();
         children.add(child);
-        transformManager.createComponent(child);
+        await transformManager.createComponent(child);
 
         // Set parent relationship
         await FilamentApp.instance!.setParent(child, parent);
@@ -99,7 +95,6 @@ void main() async {
 
       final emptyChildren = transformManager.getChildren(children[0]);
       expect(emptyChildren, isEmpty);
-
     });
   });
 
@@ -121,19 +116,21 @@ void main() async {
 
         var materialInstance = await FilamentApp.instance!.createUnlitMaterialInstance();
         final cube = await viewer.createGeometry(
-            GeometryHelper.cube(normals: false, uvs: false),
-            materialInstances: [materialInstance]);
+          GeometryUtils.cube(normals: false, uvs: false),
+          materialInstances: [materialInstance],
+        );
 
         // Set different colors for each cube
         await materialInstance.setParameterFloat4(
-            "baseColorFactor",
-            (i % 2 == 0) ? 1.0 : 0.0,  // Red channel
-            (i % 3 == 0) ? 1.0 : 0.0,  // Green channel
-            (i % 5 == 0) ? 1.0 : 0.0,  // Blue channel
-            1.0);
+          "baseColorFactor",
+          (i % 2 == 0) ? 1.0 : 0.0, // Red channel
+          (i % 3 == 0) ? 1.0 : 0.0, // Green channel
+          (i % 5 == 0) ? 1.0 : 0.0, // Blue channel
+          1.0,
+        );
 
         // Associate the geometry with our entity
-        transformManager.createComponent(entity);
+        await transformManager.createComponent(entity);
         assets.add(cube);
         await viewer.addToScene(cube);
       }
@@ -146,11 +143,15 @@ void main() async {
       // Update transforms in bulk - this should be faster with transaction
       for (int i = 0; i < entities.length; i++) {
         final entity = entities[i];
-        final transform = Matrix4.translation(Vector3(
-          (i - 2) * 2.0,  // Spread cubes horizontally
-          0.0,
-          0.0
-        )) * Matrix4.rotationY(i * 0.5); // Rotate each cube differently
+        final transform =
+            Matrix4.translation(
+              Vector3(
+                (i - 2) * 2.0, // Spread cubes horizontally
+                0.0,
+                0.0,
+              ),
+            ) *
+            Matrix4.rotationY(i * 0.5); // Rotate each cube differently
 
         transformManager.setTransform(entity, transform);
       }

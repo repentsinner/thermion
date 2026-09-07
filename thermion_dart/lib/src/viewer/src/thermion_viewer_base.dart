@@ -5,20 +5,25 @@ import 'dart:async';
 // A high-level interface for managing scene:
 // - adding/removing assets, lights and cameras
 // - setting post-processing options
-// -  
-// Broadly, an instance of [ThermionViewer] encapsulates a single Filament 
-// Scene, Camera and a View, with some additional commonly-used entities 
-// (skybox, background image, etc). 
+// -
+// Broadly, an instance of [ThermionViewer] encapsulates a single Filament
+// Scene, Camera and a View, with some additional commonly-used entities
+// (skybox, background image, etc).
 //
 // If you know what you are doing, you can use a lower level interface by
 // using the methods directly via FilamentApp.instance
 //
 // Note that this is a Dart class, not a Flutter class.
 abstract class ThermionViewer {
-  
   // The Filament [View] encapsulated by this viewer. Call View.getScene to get
   // the Filament [Scene].
   View get view;
+
+  // The [FilamentApp] (engine, render thread, managers) that owns this viewer.
+  // Helpers (gizmos, overlays, input delegates) should use this instead of the
+  // [FilamentApp.instance] global so they bind to the correct engine when more
+  // than one viewer/app coexists.
+  FilamentApp get app;
 
   // If [true], this viewer will render itself on every frame.
   Future setRendering(bool render);
@@ -29,8 +34,12 @@ abstract class ThermionViewer {
   // Renders a single frame (bypassing animations and plugins).
   Future renderSingleFrame();
 
-  // When [rendering] is true, sets the framerate for continuous rendering when [setRendering] is enabled.
-  Future setFrameRate(int framerate);
+  /// Sets the shared render-loop framerate cap.
+  ///
+  /// Framerate is engine-wide rather than viewer-specific. New code should
+  /// call [FilamentApp.setTargetFramerate] directly.
+  @Deprecated('Use FilamentApp.instance!.setTargetFramerate(framerate)')
+  Future<void> setFrameRate(int framerate);
 
   // Destroys/disposes the viewer (including the entire scene). You cannot use the viewer after calling this method.
   Future dispose();
@@ -39,9 +48,12 @@ abstract class ThermionViewer {
   Future<TexturedQuad> getBackgroundImage();
 
   // Set the background image to [path] (which should be .png, .jpg, or .ktx
-  // file). This will be rendered at the maximum depth (i.e. behind all other objects including the skybox).
-  // If [fillHeight] is false, the image will be rendered at its original size. Note this may cause issues with pixel density so be sure to specify the correct resolution
-  // If [fillHeight] is true, the image will be stretched/compressed to fit the height of the viewport.
+  // file). This will be rendered at the maximum depth (i.e. behind all other
+  // objects including the skybox). If [fillHeight] is false, the image will be
+  // rendered at its original size. Note this may cause issues with pixel
+  // density so be sure to specify the correct resolution If [fillHeight] is
+  // true, the image will be stretched/compressed to fit the height of the
+  // viewport.
   Future setBackgroundImage(String path, {bool fillHeight = false});
 
   // Set the background image from [texture].
@@ -55,26 +67,42 @@ abstract class ThermionViewer {
   // Removes the background image.
   Future clearBackgroundImage({bool destroy = false});
 
-  // Sets the color for the background plane (positioned at the maximum depth,
-  // i.e. behind all other objects including the skybox).
-  Future setBackgroundColor(double r, double g, double b, double alpha);
+  // Returns the skybox currently attached to this viewer's scene, or null.
+  // The viewer does not cache the skybox; this always reflects the scene, so
+  // it also returns skyboxes attached directly via [Scene.setSkybox].
+  Future<Skybox?> getSkybox();
 
-  // Load a skybox from [skyboxPath] (which must be a .ktx file)
-  Future loadSkybox(String skyboxPath);
+  /// Creates a solid-color [Skybox], attaches it to this viewer's scene, and
+  /// returns it.
+  ///
+  /// The viewer does not cache the returned skybox. It remains attached to the
+  /// scene until it is replaced or detached with [removeSkybox].
+  Future<Skybox> setBackgroundColor(double r, double g, double b, double alpha);
 
-  // Removes the skybox from the scene and destroys all associated resources.
-  Future removeSkybox();
+  // Load a skybox from [skyboxPath] (which must be a .ktx file). Returns the
+  // created [Skybox], which may be mutated (e.g. [Skybox.setColor],
+  // [Skybox.setLayerMask]) or detached via [removeSkybox].
+  Future<Skybox> loadSkybox(String skyboxPath);
 
-  // Creates an indirect light by loading the reflections/irradiance from the KTX file.
-  // Only one indirect light can be active at any given time; if an indirect light has already been loaded, it will be replaced.
-  Future loadIbl(String lightingPath,
-      {double intensity = 30000, bool destroyExisting = true});
+  /// Detaches and returns the skybox currently attached to the scene.
+  ///
+  /// This does not destroy the returned [Skybox]. The caller is responsible
+  /// for destroying it and, for a texture-backed skybox, its [Skybox.getTexture]
+  /// after the skybox is no longer needed.
+  Future<Skybox?> removeSkybox();
+
+  // Creates an indirect light by loading the reflections/irradiance from the
+  // KTX file. Only one indirect light can be active at any given time; if an
+  // indirect light has already been loaded, it will be replaced.
+  Future loadIbl(String lightingPath, {double intensity = 30000, bool destroyExisting = true});
 
   //
-  Future loadIblFromTexture(Texture texture,
-      {Texture? reflectionsTexture,
-      double intensity = 30000,
-      bool destroyExisting = true});
+  Future loadIblFromTexture(
+    Texture texture, {
+    Texture? reflectionsTexture,
+    double intensity = 30000,
+    bool destroyExisting = true,
+  });
 
   //
   // Rotates the IBL & skybox.
@@ -115,40 +143,78 @@ abstract class ThermionViewer {
   // If [addToScene] is [true], all renderable entities (including lights)
   // in the asset will be added to the scene.
   //
-  // The [initialInstances] argument determines the number of
-  // instances created when the asset is first instantiated. If [keepData] is
-  // false, no further instances will be able to be created.
+  // [initialInstances] must be >= 1, and determines the number of instances
+  // that are pre-allocated when the asset is created. See [AssetLoader.h]
+  // for a detailed explanation of glTF instances.
+
+  // The [ThermionAsset] returned by [loadGltf] will always have at least one
+  // instance. If only one instance is created, then the parent [ThermionAsset]
+  // and the "instance" [ThermionAsset] can be used interchangeably.
   //
-  // If [keepData] is true, additional instances can be created by calling
-  // [createInstance] on the returned asset.
+  // If [releaseSourceData] is false, you can create additional instances by
+  // calling [createInstance] on the returned asset. Instances can be retrieved
+  // with [getInstances].
   //
-  // Creating instances at asset load time is more efficient than dynamically
-  // instantating at a later time.
+  // If [releaseSourceData] is true, [initialInstances] will be created but no
+  // further instances will be able to be created.
   //
-  // Instances can be retrieved with [getInstances].
+  // If [releaseSourceData] is false and you only need a fixed set of
+  // instances, call [ThermionAsset.releaseSourceData] once those instances
+  // have been created to free the CPU-side glTF source copy (the original
+  // .glb buffer). Afterwards, [createInstance] will no longer be available.
+  //
+  // Creating instances by specifying [initialInstances] at asset load time is
+  // generally more efficient than dynamically instantating at a later time.
+  //
+  // If [requiredGeometryCapabilities] contains [SceneAssetGeometryCapability.barycentrics]
+  // or [SceneAssetGeometryCapability.uniqueTriangleCorners], vertex buffers are rebuilt
+  // after loading with a superset of attributes (POSITION, TANGENTS,
+  // UV0, CUSTOM0, and
+  // optionally BONE_INDICES/BONE_WEIGHTS). Vertices are unwelded so each
+  // triangle has unique vertices with barycentric coordinates in CUSTOM0.
+  // This allows freely swapping materials (e.g. wireframe, solid shading)
+  // via [setMaterialInstanceForAll] without creating separate overlay entities.
+  // Increases vertex memory usage (~3x vertex count) but preserves the full
+  // glTF feature set (animations, skeleton, instancing).
+  //
+  // If [requiredGeometryCapabilities] contains
+  // [SceneAssetGeometryCapability.writableVertices] or
+  // [SceneAssetGeometryCapability.preservedTopology], vertex buffers are
+  // rebuilt without unwelding: source vertex order and triangle indices are
+  // preserved in mutable buffers compatible with glTF morph targets.
+  //
+  // [SceneAssetGeometryCapability.writableVertices] and
+  // [SceneAssetGeometryCapability.preservedTopology] cannot be combined with
+  // [SceneAssetGeometryCapability.barycentrics] or
+  // [SceneAssetGeometryCapability.uniqueTriangleCorners]. The returned asset reports the
+  // complete set actually provided through [ThermionAsset.geometryCapabilities].
   //
   // If [loadResourcesAsync] is true, resources (textures, materials, etc) will
   // be loaded asynchronously. Some material/texture pop-in is expected.
   //
-  Future<ThermionAsset> loadGltf(String uri,
-      {bool addToScene = true,
-      int initialInstances = 1,
-      bool keepData = false,
-      String? resourceUri,
-      bool loadAsync = false});
+  Future<ThermionAsset> loadGltf(
+    String uri, {
+    bool addToScene = true,
+    int initialInstances = 1,
+    bool releaseSourceData = false,
+    Set<SceneAssetGeometryCapability> requiredGeometryCapabilities = const {},
+    String? resourceUri,
+    bool loadAsync = false,
+  });
 
   // Loads a gltf asset from the specified buffer (which contains the contents
   // of a .glb file).
   //
   // See the [loadGltf] method for documentation on arguments.
-  Future<ThermionAsset> loadGltfFromBuffer(Uint8List data,
-      {String? resourceUri,
-      int initialInstances = 1,
-      bool keepData = false,
-      int priority = 4,
-      int layer = 0,
-      bool loadResourcesAsync = false,
-      bool addToScene = true});
+  Future<ThermionAsset> loadGltfFromBuffer(
+    Uint8List data, {
+    String? resourceUri,
+    int initialInstances = 1,
+    bool releaseSourceData = false,
+    Set<SceneAssetGeometryCapability> requiredGeometryCapabilities = const {},
+    bool loadResourcesAsync = false,
+    bool addToScene = true,
+  });
 
   // Destroys [asset] and all underlying resources
   // (including instances, but excluding any manually created material instances).
@@ -156,11 +222,10 @@ abstract class ThermionViewer {
   Future destroyAsset(ThermionAsset asset);
 
   // Removes/destroys all renderable entities from the scene (including cameras).
-  // All [ThermionEntity] handles will no longer be valid after this method is called; ensure you immediately discard all references to all entities once this method is complete.
+  // All [ThermionEntity] handles will no longer be valid after this method is
+  // called; ensure you immediately discard all references to all entities once
+  // this method is complete.
   Future destroyAssets();
-
-  // Sets the tone mapping (requires postprocessing).
-  Future setToneMapper(ToneMapper mapper);
 
   // Enable/disable bloom.
   Future setBloom(bool enabled, double strength);
@@ -177,8 +242,7 @@ abstract class ThermionViewer {
   //
   // Set the world space position for [lightEntity] to the given coordinates.
   //
-  Future setLightPosition(
-      ThermionEntity lightEntity, double x, double y, double z);
+  Future setLightPosition(ThermionEntity lightEntity, double x, double y, double z);
 
   //
   // Sets the world space direction for [lightEntity] to the given vector.
@@ -205,16 +269,12 @@ abstract class ThermionViewer {
   //
   Future setAntiAliasing(bool msaa, bool fxaa, bool taa);
 
-  //
-  // Sets the draw priority for the given entity. See RenderableManager.h for more details.
-  //
+  // Sets the draw priority for the given entity. See RenderableManager.h for
+  // more details.
   Future setPriority(ThermionEntity entityId, int priority);
 
   //
-  Future<ThermionAsset> createGeometry(Geometry geometry,
-      {List<MaterialInstance>? materialInstances,
-      bool keepData = false,
-      bool addToScene = true});
+  Future<ThermionAsset> createGeometry(Geometry geometry, {List<MaterialInstance>? materialInstances});
 
   // Returns a gizmo for translating/rotating objects.
   // Only one gizmo can be visible at any given time for this viewer.
@@ -240,14 +300,16 @@ abstract class ThermionViewer {
   Future<Aabb2> getViewportBoundingBox(ThermionEntity entity);
 
   //
-  Future setGridOverlayVisibility(bool visible,
-      {List<LinearColor> axisColors = kDefaultAxisColors,
-      LinearColor gridColor = kDefaultGridColor,
-      List<double> spacing = const [1.0, 10.0, 100.0],
-      List<double> fadeInStart = const [0.001, 5.0, 50.0],
-      List<double> fadeInEnd = const [0.001, 50.0, 500.0],
-      List<double> fadeOutStart = const [10.0, 500.0, 5000.0],
-      List<double> fadeOutEnd = const [200.0, 2000.0, 20000.0]});
+  Future setGridOverlayVisibility(
+    bool visible, {
+    List<LinearColor> axisColors = kDefaultAxisColors,
+    LinearColor gridColor = kDefaultGridColor,
+    List<double> spacing = const [1.0, 10.0, 100.0],
+    List<double> fadeInStart = const [0.001, 5.0, 50.0],
+    List<double> fadeInEnd = const [0.001, 50.0, 500.0],
+    List<double> fadeOutStart = const [10.0, 500.0, 5000.0],
+    List<double> fadeOutEnd = const [200.0, 2000.0, 20000.0],
+  });
 
   /// Shows or hides a translation axis line overlay.
   ///
@@ -256,12 +318,14 @@ abstract class ThermionViewer {
   /// If [origin] is provided, it overrides the entity position.
   /// The line extends [lineLength] in both directions along [axis].
   /// Colors are hardcoded: X=red, Y=green, Z=blue.
-  Future setTranslationAxisVisibility(bool visible,
-      {ThermionEntity? entity,
-      Vector3? origin,
-      Axis? axis,
-      double lineWidth = 5.0,
-      double lineLength = 500.0});
+  Future setTranslationAxisVisibility(
+    bool visible, {
+    ThermionEntity? entity,
+    Vector3? origin,
+    Axis? axis,
+    double lineWidth = 5.0,
+    double lineLength = 500.0,
+  });
 
   //
   Future<Camera> createCamera();
