@@ -585,16 +585,19 @@ const _responseTimeout = Duration(minutes: 5);
 ///
 /// Retries up to [_maxRetries] times on network errors, non-200 responses,
 /// and empty downloads. Waits 2^attempt seconds between attempts.
-Future<void> _downloadWithRetry(String url, File destination, Logger logger) async {
+Future<void> _downloadWithRetry(
+    String url, File destination, Logger logger) async {
   for (var attempt = 1; attempt <= _maxRetries; attempt++) {
     try {
-      final client = HttpClient()..connectionTimeout = _connectionTimeout;
+      final client = HttpClient()
+        ..connectionTimeout = _connectionTimeout;
       final request = await client.getUrl(Uri.parse(url));
       final response = await request.close().timeout(_responseTimeout);
 
       if (response.statusCode != 200) {
         await response.drain<void>();
-        throw Exception("HTTP ${response.statusCode} downloading $url");
+        throw Exception(
+            "HTTP ${response.statusCode} downloading $url");
       }
 
       await response.pipe(destination.openWrite());
@@ -611,14 +614,14 @@ Future<void> _downloadWithRetry(String url, File destination, Logger logger) asy
         destination.deleteSync();
       }
       if (attempt == _maxRetries) {
-        logger.severe("Download failed after $_maxRetries attempts: $e");
+        logger.severe(
+            "Download failed after $_maxRetries attempts: $e");
         rethrow;
       }
       final delay = Duration(seconds: 1 << attempt); // 2s, 4s, 8s
       logger.warning(
-        "Download attempt $attempt/$_maxRetries failed ($e), "
-        "retrying in ${delay.inSeconds}s...",
-      );
+          "Download attempt $attempt/$_maxRetries failed ($e), "
+          "retrying in ${delay.inSeconds}s...");
       await Future<void>.delayed(delay);
     }
   }
@@ -717,8 +720,7 @@ Future<({Directory libDir, Directory includeDir})> getLibDir(
     }
 
     logger.info(
-      "Downloading prebuilt libraries for $platform/$mode from $url to ${libraryZip}, files will be unzipped to ${unzipDir}",
-    );
+        "Downloading prebuilt libraries for $platform/$mode from $url to ${libraryZip}, files will be unzipped to ${unzipDir}");
 
     await _downloadWithRetry(url, libraryZip, logger);
 
