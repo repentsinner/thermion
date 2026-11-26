@@ -3,9 +3,50 @@ cmake_minimum_required(VERSION 3.22)
 set(PROJECT_NAME "thermion_dart")
 project(${PROJECT_NAME})
 
+option(THERMION_WEB_MAIN_THREAD
+  "Run Thermion commands on the calling thread instead of a render worker" OFF)
+
+# Runtime material compilation (filamat::MaterialBuilder). Opt-in: bakes
+# glslang/SPIRV-Tools into the wasm (tens of MB), so the default engine
+# leaves it out and wasm-ld dead-code-eliminates the unreferenced archive.
+# The hook selects this build via the `runtime_materials` user define, and
+# CI publishes it as the `-web-runtime-materials` artifact.
+option(THERMION_ENABLE_RUNTIME_MATERIALS
+  "Compile materials from GLSL source at runtime (links filamat)" OFF)
+
+# Compile-time feature opt-outs (../include/ThermionFeatures.h).
+# Every published web engine is built
+# with all three ON (a zip per subset would multiply the variants); the
+# options exist so a `-slim` engine can later be published as one extra
+# suffix, exactly like `-runtime-materials`. Like the native hook, a switch is
+# passed only when OFF, so default compile commands are unchanged. The link
+# list below keeps naming every archive: wasm-ld only pulls referenced
+# members, and the guards below remove the references.
+option(THERMION_ENABLE_GLTF "Load glTF assets (gltfio_core, Draco, ubershader)" ON)
+option(THERMION_ENABLE_KTX "KTX1/KTX2 textures (ktxreader, basis_transcoder)" ON)
+option(THERMION_ENABLE_IMAGE_DECODING "PNG/JPEG decoding (stb)" ON)
+
+# WebGPU needs the Emdawnwebgpu package from the Filament web archive.
+# The browser's GPUDevice belongs to the thread that requested it.
+option(THERMION_ENABLE_WEBGPU
+  "Enable the WebGPU backend (requires a Filament web artifact built with FILAMENT_SUPPORTS_WEBGPU=ON)" OFF)
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release")
 endif(NOT CMAKE_BUILD_TYPE)
+
+if(THERMION_ENABLE_WEBGPU)
+  set(THERMION_WEB_MAIN_THREAD ON)
+  set(FILAMENT_WEB_MODE release)
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(FILAMENT_WEB_MODE debug)
+  endif()
+  set(THERMION_DAWN_PORT
+    "${CMAKE_CURRENT_SOURCE_DIR}/lib/${FILAMENT_WEB_MODE}/emdawnwebgpu_pkg/emdawnwebgpu.port.py")
+  if(NOT EXISTS "${THERMION_DAWN_PORT}")
+    message(FATAL_ERROR "Extract the Filament WebGPU archive into lib/${FILAMENT_WEB_MODE} first")
+  endif()
+endif()
 
 set(MODULE_NAME "thermion_dart")
 
@@ -31,7 +72,7 @@ set(EMCC_CFLAGS ${EMCC_CFLAGS} -sALLOW_BLOCKING_ON_MAIN_THREAD=1)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sMALLOC=mimalloc)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sOFFSCREENCANVAS_SUPPORT=1)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sOFFSCREEN_FRAMEBUFFER=0)
-set(EMCC_CFLAGS ${EMCC_CFLAGS} -sNO_DISABLE_EXCEPTION_CATCHING)
+set(EMCC_CFLAGS ${EMCC_CFLAGS} -fno-exceptions)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sASYNCIFY=0)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sMIN_WEBGL_VERSION=2)
 set(EMCC_CFLAGS ${EMCC_CFLAGS} -sMAX_WEBGL_VERSION=2)
@@ -83,39 +124,15 @@ endif()
 set(CMAKE_VERBOSE_MAKEFILE OFF)
 
 add_link_options(${EMCC_CFLAGS} -pthread)
+set(MATERIAL_READER "${CMAKE_CURRENT_SOURCE_DIR}/src/read_material.js")
+add_link_options(--post-js "${MATERIAL_READER}")
 
-link_directories("${CMAKE_CURRENT_SOURCE_DIR}/lib") 
+link_directories("${CMAKE_CURRENT_SOURCE_DIR}/lib")
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY build/out)
 
-# Material backend variant selection.
-# Set -DTHERMION_MATERIAL_VARIANT=<value> on the cmake command line:
-#   native       — OpenGL+Metal+Vulkan (GLSL, SPIR-V, MSL) [default for native, not for web]
-#   webgpu       — WebGPU only (WGSL)
-#   web_webgl    — WebGL2 only (GLSL), smallest web variant
-#   web_combined — WebGL2 + WebGPU (GLSL + WGSL), runtime backend selection
-if(NOT DEFINED THERMION_MATERIAL_VARIANT)
-  set(THERMION_MATERIAL_VARIANT "web_webgl")
-endif()
-message(STATUS "Material variant: ${THERMION_MATERIAL_VARIANT}")
-
-# Collect material .c files for the selected variant only.
-# Using an explicit list avoids the glob picking up _native.c AND _webgpu.c
-# (which would cause duplicate symbol definitions).
-set(MATERIAL_SOURCES
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/capture_uv_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/grid_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/image_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/linear_depth_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/unlit_fixed_size_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/silhouette_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/edge_outline_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/wireframe_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/translation_axis_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/bone_overlay_${THERMION_MATERIAL_VARIANT}.c"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../include/material/gizmo_material_${THERMION_MATERIAL_VARIANT}.c"
-)
-
+# The Dart build hook and download_web embed selected materials as custom
+# sections in a copy of this engine.
 file(GLOB SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/c_api/*.cpp"
@@ -126,8 +143,14 @@ file(GLOB SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/transform_pipeline/*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/../include/resources/*.c"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/ThermionWebApi.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/WebJobThread.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/RenderManagerWeb.cpp"
    # "${CMAKE_CURRENT_SOURCE_DIR}/../src/rendering/EmscriptenTest.cpp"
   )
+
+# The Dart native build hook compiles NativeJobThread from native/src.
+# Web supplies its own implementation, outside that source tree.
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../src/rendering/NativeJobThread.cpp")
 
 if(DEFINED EXTERNAL_PROJECTS)
 
@@ -157,16 +180,33 @@ else()
 endif()
 
 message(STATUS "Total source files being compiled: ${SOURCES}")
-add_executable(${MODULE_NAME} ${SOURCES} ${MATERIAL_SOURCES})
+add_executable(${MODULE_NAME} ${SOURCES})
+set_property(TARGET ${MODULE_NAME} APPEND PROPERTY LINK_DEPENDS "${MATERIAL_READER}")
+if(THERMION_WEB_MAIN_THREAD)
+  target_compile_definitions(${MODULE_NAME} PRIVATE THERMION_WEB_MAIN_THREAD=1)
+endif()
+if(THERMION_ENABLE_WEBGPU)
+  set(WEBGPU_DEVICE_JS "${CMAKE_CURRENT_SOURCE_DIR}/src/webgpu_device.js")
+  # Match Filament's RTTI settings in the platform adapter. The Web API's
+  # separate Emscripten bindings still use RTTI.
+  set(WEBGPU_PLATFORM "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/ThermionWebGPUPlatform.cpp")
+  target_sources(${MODULE_NAME} PRIVATE "${WEBGPU_PLATFORM}")
+  set_source_files_properties("${WEBGPU_PLATFORM}" PROPERTIES COMPILE_OPTIONS "-fno-rtti")
+  target_compile_options(${MODULE_NAME} PRIVATE "--use-port=${THERMION_DAWN_PORT}")
+  target_compile_features(${MODULE_NAME} PRIVATE cxx_std_20)
+  target_link_options(${MODULE_NAME} PRIVATE "--use-port=${THERMION_DAWN_PORT}"
+    --pre-js "${WEBGPU_DEVICE_JS}")
+  set_property(TARGET ${MODULE_NAME} APPEND PROPERTY LINK_DEPENDS "${WEBGPU_DEVICE_JS}")
+  target_compile_definitions(${MODULE_NAME} PRIVATE THERMION_SUPPORTS_WEBGPU=1)
+  message(STATUS "WebGPU backend enabled (THERMION_ENABLE_WEBGPU=ON)")
+endif()
 
 set_target_properties(${MODULE_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
 target_compile_definitions(${MODULE_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 
-# Set the material backend define so forwarding headers resolve correctly.
-string(TOUPPER ${THERMION_MATERIAL_VARIANT} VARIANT_UPPER)
-target_compile_definitions(${MODULE_NAME} PRIVATE THERMION_MATERIAL_${VARIANT_UPPER})
 target_compile_options(${MODULE_NAME} PRIVATE -matomics -mbulk-memory)
+target_compile_options(${MODULE_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>")
 target_compile_features(${MODULE_NAME} PRIVATE cxx_std_17)
 
 
@@ -206,9 +246,27 @@ set_property(TARGET filament PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_S
 set_property(TARGET filament PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilament.a")
 
 add_library(filamat STATIC IMPORTED)
-set_property(TARGET filamat PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libfilamat.a")
-set_property(TARGET filamat  PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilamat.a")
-set_property(TARGET filamat  PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilamat.a")
+# NB: the web artifact flattens filament's BUILD tree, where the filamat-only
+# archive is libfilamat.a and the full archive (filamat + glslang +
+# SPIRV-Tools + spirv-cross + zstd) keeps its libfilamat_combined.a name —
+# native platform zips rename the combined archive TO libfilamat.a instead.
+# Link the combined one or glslang/SPIRV symbols won't resolve.
+set_property(TARGET filamat PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libfilamat_combined.a")
+set_property(TARGET filamat  PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilamat_combined.a")
+set_property(TARGET filamat  PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libfilamat_combined.a")
+
+# smol-v ships complete in every filament zip (web release confirmed; native
+# zips install it via the same install rule). It must be linked DIRECTLY, not
+# via libfilamat_combined.a: the combined archive is assembled by filament's
+# combine-static-libs.sh with `ar -qc` (quick append), which does not
+# regenerate the archive's symbol table — members appended that way are
+# invisible to linker symbol lookup, so the smolv::Encode etc. members our
+# smolv patch added would still be unresolvable. See the smol_v link in the
+# runtime-materials section below.
+add_library(smol_v STATIC IMPORTED)
+set_property(TARGET smol_v PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libsmol-v.a")
+set_property(TARGET smol_v  PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libsmol-v.a")
+set_property(TARGET smol_v  PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libsmol-v.a")
 
 add_library(utils STATIC IMPORTED)
 set_property(TARGET utils PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libutils.a")
@@ -340,6 +398,40 @@ target_link_libraries(${MODULE_NAME}
  png
  ${EXTERNAL_ALL_LIBRARIES}
 )
+
+# Runtime material compilation. filamat's combined archive already bundles
+# glslang/SPIRV/spirv-cross/zstd; shaders provides the SHADERS_PACKAGE chunks
+# CodeGenerator bakes into every material. matp (the .mat parser behind matc,
+# for compileMaterialPackage) references filamat, so it comes BEFORE it;
+# smol_v comes AFTER filamat (it is a leaf library filamat references).
+if(THERMION_ENABLE_RUNTIME_MATERIALS)
+  add_library(shaders STATIC IMPORTED)
+  set_property(TARGET shaders PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libshaders.a")
+  set_property(TARGET shaders PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libshaders.a")
+  set_property(TARGET shaders PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libshaders.a")
+  add_library(matp STATIC IMPORTED)
+  set_property(TARGET matp PROPERTY IMPORTED_LOCATION_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/lib/debug/libmatp.a")
+  set_property(TARGET matp PROPERTY IMPORTED_IMPLIB_PROFILE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libmatp.a")
+  set_property(TARGET matp PROPERTY IMPORTED_LOCATION_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/lib/release/libmatp.a")
+  target_link_libraries(${MODULE_NAME} matp filamat shaders smol_v)
+  message(STATUS "Runtime material compilation enabled (matp + filamat + smol-v linked)")
+endif()
+
+# The macro is a value check: always pass 0 or 1 so a build with the option
+# off cannot fall back to presence semantics.
+target_compile_definitions(${MODULE_NAME}
+  PRIVATE THERMION_ENABLE_RUNTIME_MATERIALS=$<BOOL:${THERMION_ENABLE_RUNTIME_MATERIALS}>)
+
+# Feature opt-outs: only DISABLED features are passed (=0); the header defaults
+# every switch to 1, so the all-on build defines nothing (see
+# ../include/ThermionFeatures.h). Thermion_getEnabledFeatures reports the
+# resulting bitmask to Dart.
+foreach(_feature GLTF KTX IMAGE_DECODING)
+  if(NOT THERMION_ENABLE_${_feature})
+    target_compile_definitions(${MODULE_NAME} PRIVATE THERMION_ENABLE_${_feature}=0)
+    message(STATUS "Feature disabled: THERMION_ENABLE_${_feature}=0")
+  endif()
+endforeach()
 
 # Force linker to include all symbols from external libraries (prevents dead code elimination)
 # This is critical because nothing in Thermion directly references these libraries

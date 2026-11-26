@@ -8,15 +8,24 @@
 !thermion_dart/native/web/
 thermion_dart/native/web/build/
 thermion_dart/native/web/build/**
+# Main-thread engine build dir (see regenerate-bindings-and-materials.yml
+# "Compile web (main-thread)"; `**/*/build` above does not match this name).
+thermion_dart/native/web/build-main-thread/
+# WebGPU engine build dir (see build-filament.yml "Build WebGPU engine").
+thermion_dart/native/web/build-webgpu/
 **/*/pubspec.lock
 pubspec_overrides.yaml
 !thermion_flutter/thermion_flutter/pubspec_overrides.yaml
 /pubspec.lock
 *.iml
 **/*/*.filamat
+**/.thermion-materials.json
+**/.thermion-materials.lock
 **/*/*.g.dart
 **/*.BAK
 .wrangler
 node_modules
 .claude
 .tickets
+.tina/
+examples/dart/headless_runner/output/

@@ -5,11 +5,13 @@ import 'dart:math' as math;
 import 'package:logging/logging.dart';
 import 'package:thermion_dart/src/bindings/src/thermion_dart_js_interop.g.dart';
 import 'package:thermion_dart/src/filament/src/implementation/ffi_filament_app.dart';
-import 'package:thermion_dart/thermion_dart.dart' hide NativeLibrary, Image_decode;
+import 'package:thermion_dart/thermion_dart.dart'
+    hide NativeLibrary, Image_decode;
 import 'package:thermion_examples_lib/examples_lib.dart';
 import 'package:web/web.dart';
 
 import 'effects_controls.dart';
+import 'versions.dart';
 import 'web_input_handler.dart';
 
 /// Assets are served at a relative `assets/` path on web (the default web
@@ -32,8 +34,7 @@ Future<void> main() async {
 /// Build the example-selector dropdown from the registry. Selecting an entry
 /// reloads the page with `?example=<name>`.
 void _buildSelector(String current) {
-  final select =
-      document.getElementById("example-select") as HTMLSelectElement;
+  final select = document.getElementById("example-select") as HTMLSelectElement;
   for (final name in galleryScenes.keys) {
     final opt = HTMLOptionElement();
     opt.value = name;
@@ -41,21 +42,28 @@ void _buildSelector(String current) {
     opt.selected = (name == current);
     select.appendChild(opt);
   }
-  select.addEventListener('change', (Event _) {
-    final uri = Uri.parse(window.location.href);
-    final q = Map<String, String>.from(uri.queryParameters)
-      ..['example'] = select.value;
-    window.location.assign(uri.replace(queryParameters: q).toString());
-  }.toJS);
+  select.addEventListener(
+      'change',
+      (Event _) {
+        final uri = Uri.parse(window.location.href);
+        final q = Map<String, String>.from(uri.queryParameters)
+          ..['example'] = select.value;
+        window.location.assign(uri.replace(queryParameters: q).toString());
+      }.toJS);
 }
 
 Future<void> _boot() async {
   Logger.root.onRecord.listen((record) => print(record));
 
+  // Paint the bottom-right version badge before anything slow happens, so it
+  // is visible even while the scene loads (it only reads compile-time consts).
+  installVersionBadge();
+
   // Load the Emscripten module that index.html placed on window.thermion_dart.
   NativeLibrary.initBindings("thermion_dart");
 
-  final canvas = document.getElementById("thermion_canvas") as HTMLCanvasElement;
+  final canvas =
+      document.getElementById("thermion_canvas") as HTMLCanvasElement;
 
   // ?example=NAME selects the scene; default to basics.
   final exampleName = Uri.base.queryParameters['example'] ?? 'basics';
@@ -130,76 +138,112 @@ Future<void> _boot() async {
   await setup(viewer, assetsDir: assetsDir);
   if (exampleName == 'effects') {
     await installEffectsControls(viewer);
+  } else if (effectSliders.isNotEmpty) {
+    installGameEffectControls(switch (exampleName) {
+      'rain_glass' => 'Rain-streaked glass',
+      'fog_light_shafts' => 'Fog and light shafts',
+      'tornado' => 'Tornado',
+      'sandstorm' => 'Sandstorm',
+      'cloth' => 'Silk / Velvet / Woven',
+      'hair_fur' => 'Hair and fur',
+      'aurora' => 'Aurora',
+      'nebula' => 'Nebula',
+      'iridescence' => 'Iridescent materials',
+      'interior_mapping' => 'Interior mapping',
+      'subsurface' => 'Subsurface scattering',
+      'car_paint' => 'Multi-flake car paint',
+      'underwater_caustics' => 'Underwater caustics',
+      'ferrofluid' => 'Magnetic ferrofluid',
+      'showcase' => 'Storm Observatory',
+      _ => 'Material controls',
+    });
   }
   if (loadingText != null) {
     loadingText.textContent = 'Starting render loop…';
   }
 
-  // Orbit camera: drag to orbit a target (the origin, where transformToUnitCube
-  // places every scene), scroll to dolly. The camera is updated on every
-  // pointer event (per-event, not per-frame) so motion is continuous -- batching
-  // per frame used to quantize the orbit because pointer events and frames
-  // aren't phase-locked.
-  final target = Vector3.zero();
+  // Material scenes orbit their subject; sky scenes preserve the eye position
+  // and rotate the initial view direction. Starting from the actual camera
+  // pose avoids snapping to the ground on the first drag in the aurora scene.
+  final target = effectCameraControls?.focus ?? Vector3.zero();
+  final lookAround = effectCameraControls?.lookAround ?? false;
   final up = Vector3(0, 1, 0);
-  final camPos = (await camera.getModelMatrix()).getTranslation();
-  final r0 = camPos.length == 0 ? 1.0 : camPos.length;
+  final cameraModel = await camera.getModelMatrix();
+  final camPos = cameraModel.getTranslation();
+  final axis = cameraModel.getColumn(2);
+  final direction =
+      lookAround ? Vector3(-axis.x, -axis.y, -axis.z) : camPos - target;
+  final r0 = direction.length == 0 ? 1.0 : direction.length;
   var radius = r0;
-  var elevation = math.asin((camPos.y / r0).clamp(-1.0, 1.0));
-  var azimuth = math.atan2(camPos.x, camPos.z);
+  var elevation = math.asin((direction.y / r0).clamp(-1.0, 1.0));
+  var azimuth = math.atan2(direction.x, direction.z);
+  var focalLength = await camera.getFocalLength();
+  final near = await camera.getNear();
+  final far = await camera.getCullingFar();
   const orbitSensitivity = 0.005;
   const scrollSensitivity = 0.01;
   final elevMax = math.pi / 2 - 0.05;
 
   void applyCamera() {
     final ce = math.cos(elevation);
-    final eye = target +
-        Vector3(
-              ce * math.sin(azimuth),
-              math.sin(elevation),
-              ce * math.cos(azimuth),
-            ) *
-            radius;
-    camera.setModelMatrix(makeViewMatrix(eye, target, up)..invert());
+    final direction = Vector3(
+        ce * math.sin(azimuth), math.sin(elevation), ce * math.cos(azimuth));
+    final eye = lookAround ? camPos : target + direction * radius;
+    final focus = lookAround ? camPos + direction : target;
+    camera.setModelMatrix(makeViewMatrix(eye, focus, up)..invert());
   }
 
   WebInputHandler(
     canvas: canvas,
     onDrag: (dx, dy) {
+      effectCameraUserControlled = true;
       azimuth -= dx * orbitSensitivity;
       elevation = (elevation - dy * orbitSensitivity).clamp(-elevMax, elevMax);
       applyCamera();
     },
     onScroll: (s) {
-      radius = (radius + s * scrollSensitivity).clamp(1.0, 50.0);
-      applyCamera();
+      effectCameraUserControlled = true;
+      if (lookAround) {
+        focalLength = (focalLength * math.exp(-s * .001)).clamp(12.0, 80.0);
+        camera.setLensProjection(
+            near: near,
+            far: far,
+            aspect: canvas.clientWidth / math.max(canvas.clientHeight, 1),
+            focalLength: focalLength);
+      } else {
+        radius = (radius + s * scrollSensitivity).clamp(1.0, 50.0);
+        applyCamera();
+      }
     },
   );
 
-  info.textContent = "$exampleName — drag to orbit, scroll to zoom";
+  info.textContent =
+      '$exampleName — drag to ${lookAround ? 'look around' : 'orbit'}, scroll to zoom';
 
   // Debounced resize: rebuild the swapchain at the new canvas size and re-sync
   // the projection aspect so the scene keeps its proportions.
   Timer? resizeTimer;
-  window.addEventListener('resize', (Event _) {
-    resizeTimer?.cancel();
-    resizeTimer = Timer(const Duration(milliseconds: 150), () async {
-      try {
-        final w = canvas.clientWidth;
-        final h = canvas.clientHeight;
-        if (w == 0 || h == 0) return;
-        await app.renderManager.detach(viewer.view);
-        await app.destroySwapChain(swapChain);
-        swapChain = await app.createHeadlessSwapChain(w, h);
-        await app.renderManager.attach(viewer.view, swapChain);
-        await viewer.view.setViewport(w, h);
-        await _syncAspect(camera, w, h);
-      } catch (e) {
-        // Resize failures must not kill the render loop.
-        print('resize failed: $e');
-      }
-    });
-  }.toJS);
+  window.addEventListener(
+      'resize',
+      (Event _) {
+        resizeTimer?.cancel();
+        resizeTimer = Timer(const Duration(milliseconds: 150), () async {
+          try {
+            final w = canvas.clientWidth;
+            final h = canvas.clientHeight;
+            if (w == 0 || h == 0) return;
+            await app.renderManager.detach(viewer.view);
+            await app.destroySwapChain(swapChain);
+            swapChain = await app.createHeadlessSwapChain(w, h);
+            await app.renderManager.attach(viewer.view, swapChain);
+            await viewer.view.setViewport(w, h);
+            await _syncAspect(camera, w, h);
+          } catch (e) {
+            // Resize failures must not kill the render loop.
+            print('resize failed: $e');
+          }
+        });
+      }.toJS);
 
   // On web FILAMENT_SINGLE_THREADED is true: render() is fire-and-forget and
   // the C++ worker drives the actual rAF loop. Its RenderManager tick advances
@@ -207,8 +251,17 @@ Future<void> _boot() async {
   // only requests a render. Updating the animation manager here with a Dart
   // frame delta would mix clock domains and repeatedly reset the pose.
   var firstFrame = true;
-  void pump(num _) {
-    app.render();
+  num? firstTimestamp;
+  late final JSFunction pump;
+  Future<void> renderFrame(num timestamp) async {
+    firstTimestamp ??= timestamp;
+    // Material animation uses elapsed seconds, independently of the native
+    // skeletal-animation clock. Await writes before requesting the next frame.
+    final seconds = (timestamp - firstTimestamp!) / 1000;
+    for (final animate in effectAnimators) {
+      await animate(seconds);
+    }
+    await app.render();
     // The scene is built and a frame has been requested — drop the loading
     // overlay now (it has served through boot + the asset fetch). Done on the
     // first tick rather than right after setup() to avoid a black flash in the
@@ -217,10 +270,20 @@ Future<void> _boot() async {
       firstFrame = false;
       loading?.setAttribute('hidden', '');
     }
-    window.requestAnimationFrame(pump.toJS);
+    window.requestAnimationFrame(pump);
   }
 
-  window.requestAnimationFrame(pump.toJS);
+  pump = ((num timestamp) {
+    unawaited(
+        renderFrame(timestamp).catchError((Object error, StackTrace stack) {
+      final element = document.getElementById('error') as HTMLElement?;
+      if (element != null) {
+        element.textContent = '$error\n$stack';
+        element.style.display = 'block';
+      }
+    }));
+  }).toJS;
+  window.requestAnimationFrame(pump);
 }
 
 /// Re-apply the camera's current lens with the real viewport aspect, so the

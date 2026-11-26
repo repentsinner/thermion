@@ -16,14 +16,24 @@
 #include <image/ColorTransform.h>
 #include <backend/DriverEnums.h>
 
-#include <ktxreader/Ktx1Reader.h>
-#include <ktxreader/Ktx2Reader.h>
-
+#include "ThermionFeatures.h"
 #include "c_api/TTexture.h"
 
 #include "Log.hpp"
+#include "rendering/EngineApiLock.hpp"
 
+#if THERMION_ENABLE_KTX
+#include <ktxreader/Ktx1Reader.h>
+#include <ktxreader/Ktx2Reader.h>
+#endif
+
+#if THERMION_ENABLE_IMAGE_DECODING
 #include <third_party/stb/stb_image.h>
+#endif
+
+// Only the decoder-backed entry points are guarded. LinearImage itself
+// (Image_createEmpty, Image_get*,
+// Texture_loadImage) is core and unaffected.
 
 #ifdef __cplusplus
 namespace thermion
@@ -42,7 +52,7 @@ namespace thermion
 
         EMSCRIPTEN_KEEPALIVE TLinearImage *Image_decode(uint8_t *data, size_t length, const char *name = "image", bool alpha = true)
         {
-
+#if THERMION_ENABLE_IMAGE_DECODING
             auto start = std::chrono::high_resolution_clock::now();
 
             int width, height, channels;
@@ -97,29 +107,48 @@ namespace thermion
             }
 
             return reinterpret_cast<TLinearImage *>(linearImage);
+#else
+            // Stub: the stb decoder is not linked in this
+            // build (features.image_decoding: false); Dart's decodeImage
+            // throws UnsupportedError before reaching here.
+            ERROR("Image_decode: image decoding is disabled in this build (features.image_decoding: false)");
+            return nullptr;
+#endif
         }
 
         EMSCRIPTEN_KEEPALIVE TKtx1Bundle *Ktx1Bundle_create(uint8_t *ktxData, size_t length)
         {
+#if THERMION_ENABLE_KTX
             auto *bundle = new image::Ktx1Bundle(ktxData, static_cast<uint32_t>(length));
             return reinterpret_cast<TKtx1Bundle *>(bundle);
+#else
+            ERROR("Ktx1Bundle_create: KTX support is disabled in this build (features.ktx: false)");
+            return nullptr;
+#endif
         }
 
         EMSCRIPTEN_KEEPALIVE bool Ktx1Bundle_isCubemap(TKtx1Bundle *tBundle)
         {
+#if THERMION_ENABLE_KTX
             auto *bundle = reinterpret_cast<image::Ktx1Bundle *>(tBundle);
             return bundle->isCubemap();
+#else
+            return false;
+#endif
         }
 
         EMSCRIPTEN_KEEPALIVE void Ktx1Bundle_destroy(
             TKtx1Bundle *tBundle)
         {
+#if THERMION_ENABLE_KTX
             auto *bundle = reinterpret_cast<image::Ktx1Bundle *>(tBundle);
             delete bundle;
+#endif
         }
 
         EMSCRIPTEN_KEEPALIVE void Ktx1Bundle_getSphericalHarmonics(TKtx1Bundle *tBundle, float *sphericalHarmonics)
         {
+#if THERMION_ENABLE_KTX
             auto *bundle = reinterpret_cast<image::Ktx1Bundle *>(tBundle);
             filament::math::float3 harmonics[9];
             if (sphericalHarmonics)
@@ -127,9 +156,15 @@ namespace thermion
                 bundle->getSphericalHarmonics(harmonics);
                 memcpy(sphericalHarmonics, harmonics, 27 * sizeof(float));
             }
+#else
+            (void)tBundle;
+            (void)sphericalHarmonics;
+#endif
         }
 
         EMSCRIPTEN_KEEPALIVE TTexture *Ktx2Reader_createTexture(TEngine *tEngine, uint8_t* data, size_t size) {
+#if THERMION_ENABLE_KTX
+            THERMION_ENGINE_API_GUARD;
             std::vector<uint8_t> copy(data, data + size);
             auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
             auto reader = new ktxreader::Ktx2Reader(*engine);
@@ -172,6 +207,11 @@ namespace thermion
 
             delete reader;
             return reinterpret_cast<TTexture *>(texture);
+#else
+            (void)tEngine; (void)data; (void)size;
+            ERROR("Ktx2Reader_createTexture: KTX support is disabled in this build (features.ktx: false)");
+            return nullptr;
+#endif
 
         }
 
@@ -181,6 +221,8 @@ namespace thermion
             uint32_t requestId,
             VoidCallback onTextureUploadComplete)
         {
+#if THERMION_ENABLE_KTX
+            THERMION_ENGINE_API_GUARD;
 
             auto engine = reinterpret_cast<filament::Engine *>(tEngine);
 
@@ -204,10 +246,24 @@ namespace thermion
                         if (callbackPtr)
                         {
                             auto callback = ((VoidCallback)callbackPtr);
-                            callback(requestId);
+                            thermion::deferDartCallback([callback, requestId] { callback(requestId); });
                         } },
                     (void *)callbackData);
             return reinterpret_cast<TTexture *>(texture);
+#else
+            // Stub (features.ktx: false). Dart's KTX guard throws before this
+            // is reached, but a raw caller hands over borrowed bundle memory
+            // and waits for onTextureUploadComplete to release it, so a stub
+            // that never fires the callback would leave it hanging (the
+            // GltfResourceLoader_addResourceData stub invokes onRelease for
+            // the same reason).
+            (void)tEngine; (void)tBundle;
+            ERROR("Ktx1Reader_createTexture: KTX support is disabled in this build (features.ktx: false)");
+            if (onTextureUploadComplete) {
+                onTextureUploadComplete(requestId);
+            }
+            return nullptr;
+#endif
         }
 
         EMSCRIPTEN_KEEPALIVE float *Image_getBytes(TLinearImage *tLinearImage)
@@ -503,6 +559,7 @@ namespace thermion
             TTextureSamplerType tSamplerType,
             TTextureFormat tFormat)
         {
+            THERMION_ENGINE_API_GUARD;
             TRACE("Creating texture %dx%d (depth %d), sampler type %d, format %d tUsage %d, %d levels", width, height, depth, static_cast<int>(tSamplerType), static_cast<int>(tFormat), tUsage, levels);
             auto *engine = reinterpret_cast<::filament::Engine *>(tEngine);
             auto format = convertToFilamentFormat(tFormat);
@@ -543,6 +600,7 @@ namespace thermion
 
         EMSCRIPTEN_KEEPALIVE void Texture_setExternalImage(TEngine *tEngine, TTexture *tTexture, void *externalImage)
         {
+            THERMION_ENGINE_API_GUARD;
             auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
             auto *texture = reinterpret_cast<filament::Texture *>(tTexture);
             auto *extImg = static_cast<filament::backend::Platform::ExternalImage *>(externalImage);
@@ -552,12 +610,14 @@ namespace thermion
 
         EMSCRIPTEN_KEEPALIVE size_t Texture_getLevels(TTexture *tTexture)
         {
+            THERMION_ENGINE_API_GUARD;
             auto texture = reinterpret_cast<filament::Texture *>(tTexture);
             return texture->getLevels();
         }
 
         EMSCRIPTEN_KEEPALIVE bool Texture_loadImage(TEngine *tEngine, TTexture *tTexture, TLinearImage *tImage, TPixelDataFormat tBufferFormat, TPixelDataType tPixelDataType, int level)
         {
+            THERMION_ENGINE_API_GUARD;
             auto engine = reinterpret_cast<filament::Engine *>(tEngine);
             auto image = reinterpret_cast<::image::LinearImage *>(tImage);
             auto texture = reinterpret_cast<filament::Texture *>(tTexture);
@@ -623,8 +683,11 @@ namespace thermion
             uint32_t height,
             uint32_t depth,
             uint32_t tBufferFormat,
-            uint32_t tPixelDataType)
+            uint32_t tPixelDataType,
+            void (*onRelease)(void *, size_t, void *),
+            void *userData)
         {
+            THERMION_ENGINE_API_GUARD;
             auto engine = reinterpret_cast<filament::Engine *>(tEngine);
 
             auto texture = reinterpret_cast<filament::Texture *>(tTexture);
@@ -632,18 +695,8 @@ namespace thermion
             auto pixelDataType = static_cast<PixelBufferDescriptor::PixelDataType>(tPixelDataType);
             TRACE("Setting texture image for level %d, offset %dx%dx%d, depth %d", level, x_offset, y_offset, z_offset, depth);
 
-            // the texture upload is async, so we need to copy the buffer
-            auto *buffer = new std::vector<uint8_t>(size);
-            std::copy(data, data + size, buffer->begin());
-
-            filament::Texture::PixelBufferDescriptor::Callback freeCallback = [](void *buf, size_t,
-                                                                                 void *data)
-            {
-                delete reinterpret_cast<std::vector<uint8_t> *>(data);
-            };
-
             filament::Texture::PixelBufferDescriptor pbd(
-                buffer->data(),
+                data,
                 size,
                 bufferFormat,
                 pixelDataType,
@@ -651,8 +704,8 @@ namespace thermion
                 0, // left
                 0, // top
                 0, // stride
-                freeCallback,
-                buffer);
+                onRelease,
+                userData);
 
             texture->setImage(
                 *engine,
@@ -668,32 +721,138 @@ namespace thermion
             return true;
         }
 
+        EMSCRIPTEN_KEEPALIVE bool Texture_setMipChain(
+            TEngine *tEngine,
+            TTexture *tTexture,
+            const TMipLevel *levels,
+            uint32_t levelCount,
+            void (*onRelease)(void *, size_t, void *),
+            void *userData)
+        {
+            THERMION_ENGINE_API_GUARD;
+            auto engine = reinterpret_cast<filament::Engine *>(tEngine);
+            auto texture = reinterpret_cast<filament::Texture *>(tTexture);
+
+            if (!levels || levelCount == 0 || levelCount > texture->getLevels())
+            {
+                ERROR("Texture_setMipChain: cannot upload %u levels into a texture with %zu levels",
+                      levelCount, texture->getLevels());
+                return false;
+            }
+
+            // Validate the whole chain before uploading anything, so a bad
+            // level cannot leave the texture partially updated. Filament only
+            // checks these in debug builds; a release build would read past
+            // the caller's buffer instead.
+            for (uint32_t level = 0; level < levelCount; level++)
+            {
+                const TMipLevel &mip = levels[level];
+                if (!mip.data || mip.width == 0 || mip.height == 0 || mip.depth == 0 ||
+                    mip.width > texture->getWidth(level) ||
+                    mip.height > texture->getHeight(level) ||
+                    mip.depth > texture->getDepth(level))
+                {
+                    ERROR("Texture_setMipChain: level %u region %ux%ux%u does not fit texture level %ux%ux%u",
+                          level, mip.width, mip.height, mip.depth,
+                          (uint32_t)texture->getWidth(level), (uint32_t)texture->getHeight(level),
+                          (uint32_t)texture->getDepth(level));
+                    return false;
+                }
+
+                // The caller's byte count must cover the whole level, using
+                // Filament's own size computation with exactly the descriptor
+                // geometry the upload loop below constructs (tightly packed:
+                // stride 0 means width, alignment 1, no left/top offset).
+                // Without this a short buffer in a later level would pass
+                // validation, earlier levels would already be submitted, and
+                // Filament would read past the caller's buffer.
+                // computeTextureDataSize covers one slice, so multiply by
+                // depth for 3D/array levels. The COMPRESSED pseudo-type is
+                // not an unpacked upload: computeTextureDataSize yields 0 for
+                // it, so reject it explicitly instead of trusting that 0.
+                if (mip.type == PIXELDATATYPE_COMPRESSED)
+                {
+                    ERROR("Texture_setMipChain: level %u uses compressed pixel data, which setMipChain does not support",
+                          level);
+                    return false;
+                }
+                auto bufferFormat = static_cast<filament::Texture::Format>(mip.format);
+                auto pixelDataType = static_cast<filament::Texture::Type>(mip.type);
+                size_t required = filament::Texture::computeTextureDataSize(
+                                      bufferFormat, pixelDataType, mip.width, mip.height, 1) *
+                                  mip.depth;
+                if (mip.size < required)
+                {
+                    ERROR("Texture_setMipChain: level %u buffer is %u bytes, needs %zu for %ux%ux%u",
+                          level, mip.size, required, mip.width, mip.height, mip.depth);
+                    return false;
+                }
+            }
+
+            for (uint32_t level = 0; level < levelCount; level++)
+            {
+                const TMipLevel &mip = levels[level];
+                auto bufferFormat = static_cast<PixelBufferDescriptor::PixelDataFormat>(mip.format);
+                auto pixelDataType = static_cast<PixelBufferDescriptor::PixelDataType>(mip.type);
+
+                filament::Texture::PixelBufferDescriptor pbd(
+                    const_cast<uint8_t *>(mip.data),
+                    mip.size,
+                    bufferFormat,
+                    pixelDataType,
+                    1, // alignment
+                    0, // left
+                    0, // top
+                    0, // stride
+                    onRelease,
+                    userData);
+
+                texture->setImage(
+                    *engine,
+                    level,
+                    0,
+                    0,
+                    0,
+                    mip.width,
+                    mip.height,
+                    mip.depth,
+                    std::move(pbd));
+            }
+
+            return true;
+        }
+
         EMSCRIPTEN_KEEPALIVE uint32_t Texture_getWidth(TTexture *tTexture, uint32_t level)
         {
+            THERMION_ENGINE_API_GUARD;
             auto *texture = reinterpret_cast<filament::Texture *>(tTexture);
             return texture->getWidth();
         }
 
         EMSCRIPTEN_KEEPALIVE uint32_t Texture_getHeight(TTexture *tTexture, uint32_t level)
         {
+            THERMION_ENGINE_API_GUARD;
             auto *texture = reinterpret_cast<filament::Texture *>(tTexture);
             return texture->getHeight();
         }
 
         EMSCRIPTEN_KEEPALIVE uint32_t Texture_getDepth(TTexture *tTexture, uint32_t level)
         {
+            THERMION_ENGINE_API_GUARD;
             auto *texture = reinterpret_cast<filament::Texture *>(tTexture);
             return texture->getDepth();
         }
 
         EMSCRIPTEN_KEEPALIVE TTextureFormat Texture_getFormat(TTexture *tTexture)
         {
+            THERMION_ENGINE_API_GUARD;
             auto *texture = reinterpret_cast<filament::Texture *>(tTexture);
             return static_cast<TTextureFormat>(texture->getFormat());
         }
 
         EMSCRIPTEN_KEEPALIVE void Texture_generateMipMaps(TTexture *tTexture, TEngine *tEngine)
         {
+            THERMION_ENGINE_API_GUARD;
             auto *texture = reinterpret_cast<filament::Texture *>(tTexture);
             auto *engine = reinterpret_cast<filament::Engine *>(tEngine);
             texture->generateMipmaps(*engine);
@@ -847,6 +1006,7 @@ namespace thermion
 
         EMSCRIPTEN_KEEPALIVE TTexture *RenderTarget_getColorTexture(TRenderTarget *tRenderTarget)
         {
+            THERMION_ENGINE_API_GUARD;
             auto renderTarget = reinterpret_cast<filament::RenderTarget *>(tRenderTarget);
             auto texture = renderTarget->getTexture(filament::RenderTarget::AttachmentPoint::COLOR0);
             return reinterpret_cast<TTexture *>(texture);
@@ -854,6 +1014,7 @@ namespace thermion
 
         EMSCRIPTEN_KEEPALIVE TTexture *RenderTarget_getDepthTexture(TRenderTarget *tRenderTarget)
         {
+            THERMION_ENGINE_API_GUARD;
             auto renderTarget = reinterpret_cast<filament::RenderTarget *>(tRenderTarget);
             auto texture = renderTarget->getTexture(filament::RenderTarget::AttachmentPoint::DEPTH);
             return reinterpret_cast<TTexture *>(texture);

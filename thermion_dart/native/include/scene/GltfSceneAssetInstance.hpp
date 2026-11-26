@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -34,9 +35,13 @@ namespace thermion
             int instanceIndex = -1) : _instanceOwner(instanceOwner),
                                         _ncm(ncm), 
                                       _instance(instance),
-                                      _materialInstances(materialInstances),
+                                      // Create materialInstanceCount null pointer slots for copy_n below.
+                                      // Our own array stays valid after the caller releases theirs.
+                                      // No MaterialInstance objects are created or owned here.
+                                      _materialInstances(materialInstanceCount),
                                       _materialInstanceCount(materialInstanceCount)
         {
+            if (materialInstanceCount) std::copy_n(materialInstances, materialInstanceCount, _materialInstances.data());
         }
 
         ~GltfSceneAssetInstance();
@@ -69,7 +74,7 @@ namespace thermion
 
         MaterialInstance **getMaterialInstances() override
         {
-            return _materialInstances;
+            return _materialInstances.data();
         }
 
         size_t getMaterialInstanceCount() override
@@ -144,9 +149,24 @@ namespace thermion
         bool supportsFlatShading() const override;
         TVertexBufferStorageMode getVertexBufferStorageMode(size_t primitiveIndex) const override;
 
+        // Preserved geometry buffers live on the owning asset. Light/camera
+        // entities are only exposed on the owner, so instances keep the
+        // SceneAsset defaults (nullptr / -1) for those.
+        VertexBuffer *getVertexBuffer(size_t primitiveIndex) const override;
+        IndexBuffer *getIndexBuffer(size_t primitiveIndex) const override;
+        int getPrimitiveOffsetForEntity(utils::Entity entity) const override;
+        void releaseSourceData() override;
+        void setFlatShading(bool flatShading) override;
+
         size_t getBoneCount(size_t skinIndex) const override;
         const utils::Entity *getBones(size_t skinIndex) const override;
         const char *getBoneName(size_t skinIndex, size_t boneIndex) const override;
+
+        size_t getSkinCount() const override;
+        const math::mat4f *getInverseBindMatrices(size_t skinIndex) const override;
+        void updateBoneMatrices() override;
+
+        std::vector<std::string> getMorphTargetNames(utils::Entity childEntity) const override;
 
         bool inUse = true;
 
@@ -154,7 +174,8 @@ namespace thermion
         filament::Engine *_engine;
         utils::NameComponentManager *_ncm;
         gltfio::FilamentInstance *_instance;
-        MaterialInstance **_materialInstances = std::nullptr_t();
+        // Own the handle array; the material objects remain caller-owned.
+        std::vector<MaterialInstance*> _materialInstances;
         size_t _materialInstanceCount = 0;
         GltfSceneAsset *_instanceOwner = std::nullptr_t();
     };

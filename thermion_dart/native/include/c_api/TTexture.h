@@ -229,6 +229,10 @@ EMSCRIPTEN_KEEPALIVE bool Texture_loadImage(
     TPixelDataType pixelDataType,
     int level
 );
+// Submits pixels without copying. Filament retains them after this call returns.
+// onRelease(data, size, userData) is responsible for releasing their storage;
+// keep the buffer and any callback context valid until that callback runs.
+// The release callback may run on a native thread.
 EMSCRIPTEN_KEEPALIVE bool Texture_setImage(
     TEngine *tEngine,
     TTexture *tTexture,
@@ -242,7 +246,39 @@ EMSCRIPTEN_KEEPALIVE bool Texture_setImage(
     uint32_t height,
     uint32_t depth,
     uint32_t bufferFormat,
-    uint32_t pixelDataType
+    uint32_t pixelDataType,
+    void (*onRelease)(void *buffer, size_t size, void *userData),
+    void *userData
+);
+
+// One level of a complete mip chain for Texture_setMipChain. `data`/`size`
+// are the level's tightly packed pixels in `format`/`type` layout.
+typedef struct TMipLevel {
+    const uint8_t *data;
+    uint32_t size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    TPixelDataFormat format;
+    TPixelDataType type;
+} TMipLevel;
+
+// Uploads a complete mip chain in one batched operation: levels[i] is
+// submitted as mip level i, so levels[0] is the largest image and the chain
+// must be ordered from level 0 upward. Every entry is validated before any
+// upload starts; returns false (and uploads nothing) when levels is null,
+// levelCount is 0 or exceeds the texture's level count, or an entry's region
+// does not fit its level. Pixel ownership and the release callback match
+// Texture_setImage: Filament retains each level's buffer until the backend has
+// consumed it, then invokes onRelease once per level with that level's data
+// pointer and size (possibly on a native thread).
+EMSCRIPTEN_KEEPALIVE bool Texture_setMipChain(
+    TEngine *tEngine,
+    TTexture *tTexture,
+    const TMipLevel *levels,
+    uint32_t levelCount,
+    void (*onRelease)(void *buffer, size_t size, void *userData),
+    void *userData
 );
 EMSCRIPTEN_KEEPALIVE uint32_t Texture_getWidth(TTexture *tTexture, uint32_t level);
 EMSCRIPTEN_KEEPALIVE uint32_t Texture_getHeight(TTexture *tTexture, uint32_t level);
@@ -261,6 +297,8 @@ EMSCRIPTEN_KEEPALIVE void Ktx1Bundle_getSphericalHarmonics(
 EMSCRIPTEN_KEEPALIVE bool Ktx1Bundle_isCubemap(
     TKtx1Bundle *tBundle
 );
+// Immediately frees the bundle and its data. The caller must wait until all
+// queued creation and upload buffers have finished using it before calling this.
 EMSCRIPTEN_KEEPALIVE void Ktx1Bundle_destroy(
     TKtx1Bundle *tBundle
 );

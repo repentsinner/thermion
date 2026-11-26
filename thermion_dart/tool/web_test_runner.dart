@@ -28,6 +28,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:thermion_dart/src/hooks/built_in_materials.dart';
+import 'package:yaml_edit/yaml_edit.dart';
+
 // Must match emscripten's OFFSCREENCANVASES_TO_PTHREAD target id.
 const _canvasId = 'thermion_canvas';
 
@@ -39,7 +42,7 @@ String _wrapperHtml(String testFileName) =>
     <title>$testFileName</title>
 
     <!-- emscripten Filament module factory (built by `make wasm`, copied to test/). -->
-    <script src="thermion_dart.js"></script>
+    <script src="embedded_engine/thermion_dart.js"></script>
 
     <!-- Standard package:test bootstrap. These must be STATIC scripts: dart.js
          locates itself via document.currentScript to find the compiled test. -->
@@ -154,6 +157,21 @@ Future<void> main(List<String> args) async {
     stderr.writeln('No test files found.');
     exit(1);
   }
+
+  final pubspec = YamlEditor(File('pubspec.yaml').readAsStringSync());
+  final materialConfig = pubspec.parseAt([
+    'hooks',
+    'user_defines',
+    'thermion_dart',
+    'materials',
+  ], orElse: () => wrapAsYamlNode(null)).value;
+  await publishWebMaterials(
+    root: Directory.current,
+    engineDir: Directory('test'),
+    webDir: Directory('test/embedded_engine'),
+    materials: selectBuiltInMaterials(materialConfig, onWarning: stderr.writeln),
+    onLog: stderr.writeln,
+  );
 
   // 2. Generate the HTML wrappers.
   final generated = <File>[];

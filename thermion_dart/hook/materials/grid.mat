@@ -1,0 +1,182 @@
+
+material {
+    name : Grid,
+    parameters : [
+        {
+            type: float,
+            name: distance
+        },
+        {
+            type: float,
+            name: interval,
+        },
+        {
+            type: float,
+            name: fadeInStart
+        },
+        {
+            type: float,
+            name: fadeInEnd
+        },
+        {
+            type: float,
+            name: fadeOutStart
+        },
+        {
+            type: float,
+            name: fadeOutEnd
+        },
+        {
+            type: float,
+            name: lineSize
+        },
+        {
+            type: float3,
+            name: gridColor
+        },
+        {
+            type: float3,
+            name: axisColorX,
+            default: [1.0, 0.0, 0.0]
+        },
+        {
+            type: float3,
+            name: axisColorY,
+            default: [0.0, 1.0, 0.0]
+        },
+        {
+            type: float3,
+            name: axisColorZ,
+            default: [0.0, 0.0, 1.0]
+        },
+        {
+            type: bool,
+            name: showAxisX,
+            default : false
+        },
+        {
+            type: bool,
+            name: showAxisY,
+            default : false
+        },
+        {
+            type: bool,
+            name: showAxisZ,
+            default : false
+        }
+    ],
+    // Grid levels share a plane. Transparent cells must not write depth.
+    // Keep depth testing so geometry in front still hides the grid.
+    depthWrite : false,
+    depthCulling : true,
+    doubleSided: false,
+    shadingModel : unlit,
+    blending : transparent,
+    variantFilter : [ dynamicLighting, directionalLighting, shadowReceiver, skinning, ssr, stereo ],
+    culling : none,
+    instanced : false,
+    vertexDomain : object
+}
+
+vertex {
+
+    void materialVertex(inout MaterialVertexInputs material) {
+        vec3 position = getPosition().xyz;
+        position.xz *= materialParams.distance;
+        material.worldPosition.xz = position.xz;
+    }
+}
+
+fragment {
+
+    #include "shared.h"
+
+    /* the below has been adapted from Blender's overlay_grid_frag.glsl */
+
+    #define _1_DIV_SQRTPI 0.5641895835477563 
+    #define RADIUS (_1_DIV_SQRTPI * 1.05)
+    #define GRID_START (0.5 + RADIUS)
+    #define GRID_END (0.5 - RADIUS)
+    #define GRID_STEP(dist) smoothstep(GRID_START, GRID_END, dist)
+
+    vec3 getAxes(vec3 point, vec3 fwidthCos, float line_size)
+    {
+        vec3 axes_domain = abs(point);
+        axes_domain /= fwidthCos;
+        return GRID_STEP(axes_domain - (line_size + materialParams.lineSize));
+    }
+
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+
+        // fade fragments close together 
+        // (i.e. where camera is at a steep angle to the ground plane)
+        
+        // calculate fragment normal and distance from origin
+        vec3 V = getWorldPosition().xyz;
+        float dist = length(V);
+        V /= dist;
+        
+        float angle = V.y; 
+        angle = 1.0 - abs(angle);
+        angle *= angle;
+        float fade = (1.0 - angle) * 0.5 - smoothstep(0.0, materialParams.distance, dist - materialParams.distance); 
+
+        // now calculate the distance of the fragment 
+        // to the "grid" line 
+        vec3 P = getWorldPosition().xyz;
+        vec3 fwidthPos = fwidth(P); // world units covered by 1px in X direction + 1px in Y direction
+        P += mulMat4x4Float3(getUserWorldFromWorldMatrix(),	getWorldCameraPosition()).xyz;
+
+        vec2 halfSize = vec2(materialParams.interval / 2.0f, materialParams.interval/2.0f);        
+        vec2 gridDomain = abs(mod(P.xz + halfSize, vec2(materialParams.interval,materialParams.interval)) - halfSize);
+        gridDomain /= fwidthPos.xz;
+        float lineDist = min(gridDomain.x, gridDomain.y);
+        float gridAlpha = GRID_STEP(lineDist - materialParams.lineSize);
+
+        float4 cameraWorld = getUserWorldFromWorldMatrix() * vec4(getWorldCameraPosition(), 1.0f);
+        float cameraDistFromOrigin = length(cameraWorld.xyz);
+
+        float distanceFade = 1.0f;
+        if(cameraDistFromOrigin > materialParams.fadeOutStart) {
+            distanceFade = 1.0f - smoothstep(materialParams.fadeOutStart, materialParams.fadeOutEnd, cameraDistFromOrigin);
+        } else if(cameraDistFromOrigin < materialParams.fadeInEnd) {
+            distanceFade = smoothstep(materialParams.fadeInStart, materialParams.fadeInEnd, cameraDistFromOrigin);
+        } 
+        
+        vec3 planeAxes = vec3(1.0f, 0.0f, 1.0f);
+
+        vec3 distanceToAxes = vec3(
+            dot(P.yz, planeAxes.yz),
+            0.0f, 
+            dot(P.xy, planeAxes.xy)
+        );
+
+        vec3 dAxes = vec3(
+            dot(fwidthPos.yz, planeAxes.yz),
+            0.0f, 
+            dot(fwidthPos.xy, planeAxes.xy)
+        );
+
+        vec3 axes = getAxes(distanceToAxes, dAxes, 0.1);
+
+        vec4 color = vec4(
+            materialParams.gridColor.r,
+            materialParams.gridColor.g,
+            materialParams.gridColor.b,
+            1.0
+        );  
+
+        
+        if(axes.x > 1e-8 && materialParams.showAxisX) {
+            material.baseColor = vec4(materialParams.axisColorX * fade, gridAlpha * fade);
+        } else if(axes.z > 1e-8 && materialParams.showAxisZ) {
+            material.baseColor = vec4(materialParams.axisColorZ * fade, gridAlpha * fade);            
+        } else if(axes.y > 1e-8 && materialParams.showAxisY) {
+            material.baseColor = vec4(materialParams.axisColorY * fade, gridAlpha * fade);
+        } else {
+            material.baseColor = color * gridAlpha * fade * distanceFade; 
+        }
+
+    }
+}

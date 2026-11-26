@@ -72,7 +72,7 @@ namespace thermion
 
         MaterialInstance **getMaterialInstances() override
         {
-            return _materialInstances;
+            return _materialInstances.data();
         }
 
         size_t getMaterialInstanceCount() override
@@ -166,11 +166,37 @@ namespace thermion
         /// Toggle between flat (per-face) and smooth (per-vertex) shading.
         /// Only valid after rebuildVertexBuffers() has been called.
         /// Swaps the TANGENTS buffer object on all preserved vertex buffers.
-        void setFlatShading(bool flatShading);
+        void setFlatShading(bool flatShading) override;
 
         /// Release the underlying cgltf source data early to free memory.
         /// Safe to call multiple times; subsequent calls are no-ops.
-        void releaseSourceData();
+        void releaseSourceData() override;
+
+        // SceneAsset geometry-buffer interface: the preserved buffers rebuilt
+        // by rebuildVertexBuffers(), or nullptr when geometry is not preserved.
+        VertexBuffer *getVertexBuffer(size_t primitiveIndex) const override {
+            return getPreservedVertexBuffer(primitiveIndex);
+        }
+
+        IndexBuffer *getIndexBuffer(size_t primitiveIndex) const override {
+            return getPreservedIndexBuffer(primitiveIndex);
+        }
+
+        const Entity *getLightEntities() const override {
+            return _asset->getLightEntities();
+        }
+
+        size_t getLightEntityCount() const override {
+            return _asset->getLightEntityCount();
+        }
+
+        const Entity *getCameraEntities() const override {
+            return _asset->getCameraEntities();
+        }
+
+        size_t getCameraEntityCount() const override {
+            return _asset->getCameraEntityCount();
+        }
 
         bool geometryPreserved() const { return _geometryPreserved; }
 
@@ -198,18 +224,34 @@ namespace thermion
         /// Returns the starting primitive offset for the given entity, or -1 if
         /// the entity has no preserved geometry (e.g., non-triangle primitives
         /// or no mesh match during rebuild).
-        int getPrimitiveOffsetForEntity(utils::Entity entity) const;
+        int getPrimitiveOffsetForEntity(utils::Entity entity) const override;
 
         size_t getBoneCount(size_t skinIndex) const override;
         const utils::Entity *getBones(size_t skinIndex) const override;
         const char *getBoneName(size_t skinIndex, size_t boneIndex) const override;
+
+        /// Bone animation components are keyed by instance entities, not the
+        /// owner's root entity (they are distinct utils::Entity IDs). Resolve
+        /// owner assets to their first instance so component add/remove and
+        /// teardown all agree on the same entity.
+        SceneAsset *getSkinTarget() override
+        {
+            return _instances.empty() ? nullptr : _instances.front().get();
+        }
+
+        size_t getSkinCount() const override;
+        const math::mat4f *getInverseBindMatrices(size_t skinIndex) const override;
+        void updateBoneMatrices() override;
+
+        std::vector<std::string> getMorphTargetNames(utils::Entity childEntity) const override;
 
     private:
         gltfio::FilamentAsset *_asset;
         gltfio::AssetLoader *_assetLoader;
         Engine *_engine;
         utils::NameComponentManager *_ncm;
-        MaterialInstance **_materialInstances = nullptr;
+        // Own the handle array; the material objects remain caller-owned.
+        std::vector<MaterialInstance*> _materialInstances;
         size_t _materialInstanceCount = 0;
         std::vector<std::unique_ptr<GltfSceneAssetInstance>> _instances;
 

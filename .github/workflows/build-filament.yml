@@ -30,10 +30,19 @@ on:
         default: true
         type: boolean
       upload_to_r2:
-        description: 'Upload artifacts to R2'
+        description: 'Publish content-addressed Filament archives and the versioned WebGPU engine when built. Update the Filament pin with publish-filament-to-r2.yml.'
         required: false
         default: true
         type: boolean
+      webgpu:
+        description: 'Build Filament with FILAMENT_SUPPORTS_WEBGPU=ON (macOS and Linux)'
+        required: false
+        default: false
+        type: boolean
+      webgpu_filament_run:
+        description: 'Reuse the WebGPU Filament release archive from this Build Filament run ID (platform=web)'
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.platform || 'all' }}
@@ -55,6 +64,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check public Filament version
+        run: python3 scripts/generate-filament-version.py --check
+
       - name: Read Filament version
         id: read-version
         run: |
@@ -67,6 +79,21 @@ jobs:
           # Override individually if provided
           [ -n "${{ inputs.filament_repo }}" ] && REPO="${{ inputs.filament_repo }}"
           [ -n "${{ inputs.filament_version }}" ] && VERSION="${{ inputs.filament_version }}"
+          # Resolve VERSION=latest to the newest v*.* tag on the chosen repo.
+          # The per-platform jobs do `git clone --branch $VERSION` so we must
+          # produce a concrete tag here, not the literal string "latest".
+          if [ "$VERSION" = "latest" ]; then
+            echo "Resolving latest tag on $REPO..."
+            VERSION=$(git ls-remote --tags --refs --sort=-version:refname \
+              "$REPO" 'v*' \
+              | awk -F/ '{print $NF}' \
+              | head -1)
+            if [ -z "$VERSION" ]; then
+              echo "Error: could not resolve latest tag on $REPO"
+              exit 1
+            fi
+            echo "Resolved latest -> $VERSION"
+          fi
           echo "repo=$REPO" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building Filament repo: $REPO ref: $VERSION"
@@ -97,41 +124,84 @@ jobs:
       - name: Checkout thermion
         uses: actions/checkout@v4
 
+      - name: Test host-tool verification before building
+        run: python3 -m unittest discover -s scripts -p 'test_verify_material_host_tools.py' -v
+
       - name: Checkout Filament
         run: git clone --depth 1 --branch ${{ env.FILAMENT_VERSION }} ${{ env.FILAMENT_REPO }} filament
 
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@master
 
+      - name: Compute zip suffix
+        run: |
+          if [ "${{ inputs.webgpu }}" = "true" ]; then
+            echo "ZIP_SUFFIX=-webgpu" >> $GITHUB_ENV
+          else
+            echo "ZIP_SUFFIX=" >> $GITHUB_ENV
+          fi
+
+      - name: Free disk space
+        # The WebGPU build zips huge Dawn debug artifacts and ran out of disk
+        # (zip I/O error - No space left on device). jlumbroso/free-disk-space
+        # is Ubuntu-only, so delete the large preinstalled toolchains this
+        # build does not need: extra Xcode versions (keep the selected one),
+        # Android SDK/NDK, simulator runtimes, dotnet and ghcup.
+        run: |
+          df -h / | tail -1
+          SELECTED_XCODE=$(basename "$(dirname "$(dirname "$(xcode-select -p)")")")
+          echo "Keeping $SELECTED_XCODE"
+          for xcode in /Applications/Xcode*.app; do
+            if [ "$(basename "$xcode")" != "$SELECTED_XCODE" ]; then
+              echo "Removing $xcode"
+              sudo rm -rf "$xcode"
+            fi
+          done
+          sudo rm -rf /usr/local/lib/android /Users/runner/Library/Android
+          sudo rm -rf /Library/Developer/CoreSimulator /Users/runner/Library/Developer/CoreSimulator
+          sudo rm -rf /usr/local/share/dotnet /usr/local/.ghcup /usr/local/share/boost
+          df -h / | tail -1
+
       - name: Build Filament
         run: |
           mkdir -p output
           chmod +x scripts/build_macos.sh
-          scripts/build_macos.sh filament ${{ env.FILAMENT_VERSION }} output --clean
+          EXTRA_FLAGS=""
+          if [ "${{ inputs.webgpu }}" = "true" ]; then
+            EXTRA_FLAGS="--webgpu"
+          fi
+          scripts/build_macos.sh filament ${{ env.FILAMENT_VERSION }} output --clean $EXTRA_FLAGS
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: filament-macos-release
-          path: output/filament-${{ env.FILAMENT_VERSION }}-macos-release.zip
+          name: filament-macos-release${{ env.ZIP_SUFFIX }}
+          path: output/filament-${{ env.FILAMENT_VERSION }}-macos-release${{ env.ZIP_SUFFIX }}.zip
           retention-days: 7
 
       - name: Upload debug artifact
         uses: actions/upload-artifact@v4
         with:
-          name: filament-macos-debug
-          path: output/filament-${{ env.FILAMENT_VERSION }}-macos-debug.zip
+          name: filament-macos-debug${{ env.ZIP_SUFFIX }}
+          path: output/filament-${{ env.FILAMENT_VERSION }}-macos-debug${{ env.ZIP_SUFFIX }}.zip
           retention-days: 7
+
+      - name: Verify packaged universal matc and resgen
+        run: |
+          python3 scripts/verify-material-host-tools.py \
+            output/filament-${{ env.FILAMENT_VERSION }}-macos-release${{ env.ZIP_SUFFIX }}.zip \
+            output/filament-${{ env.FILAMENT_VERSION }}-macos-debug${{ env.ZIP_SUFFIX }}.zip
 
       - name: Upload to R2
         if: inputs.upload_to_r2
         run: |
           pip3 install --break-system-packages awscli
           for variant in release debug; do
-            aws s3 cp \
-              "output/filament-${{ env.FILAMENT_VERSION }}-macos-${variant}.zip" \
-              "s3://${{ env.R2_BUCKET_NAME }}/filament-${{ env.FILAMENT_VERSION }}-macos-${variant}.zip" \
-              --endpoint-url "${{ env.R2_ENDPOINT }}"
+            # Content-addressed keys for every artifact, including the
+            # -webgpu suffixed zips (record them into the pin via
+            # publish-filament-to-r2.yml, same as the canonical ones).
+            bash scripts/upload_filament_hashed.sh \
+              "output/filament-${{ env.FILAMENT_VERSION }}-macos-${variant}${{ env.ZIP_SUFFIX }}.zip"
           done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -140,7 +210,10 @@ jobs:
 
   build-ios:
     name: Build iOS
-    runs-on: macos-14
+    # macos-14 is retired ('macos-14-arm64-us-default is not supported' —
+    # job cancelled at allocation). macos-15 = same arm64 pool the macOS job
+    # builds on successfully.
+    runs-on: macos-15
     needs: setup
     if: contains(needs.setup.outputs.matrix, 'ios')
     env:
@@ -201,10 +274,8 @@ jobs:
           pip3 install --break-system-packages awscli
           for platform in ios ios-simulator; do
             for variant in release debug; do
-              aws s3 cp \
-                "output/filament-${{ env.FILAMENT_VERSION }}-${platform}-${variant}.zip" \
-                "s3://${{ env.R2_BUCKET_NAME }}/filament-${{ env.FILAMENT_VERSION }}-${platform}-${variant}.zip" \
-                --endpoint-url "${{ env.R2_ENDPOINT }}"
+              bash scripts/upload_filament_hashed.sh \
+                "output/filament-${{ env.FILAMENT_VERSION }}-${platform}-${variant}.zip"
             done
           done
         env:
@@ -229,8 +300,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libc++-dev libc++abi-dev ninja-build libxcb1-dev libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxxf86vm-dev
+          set -euo pipefail
+          # apt can stall for hours on runner-network DNS blackholes
+          # (azure.archive.ubuntu.com); cap each command and retry the batch.
+          retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i/3 failed: $*" >&2; sleep 20; done; return 1; }
+          retry sudo apt-get update -o Acquire::http::Timeout=30 -o Acquire::Retries=3
+          retry sudo apt-get install -y -o Acquire::http::Timeout=30 clang libc++-dev libc++abi-dev ninja-build libxcb1-dev libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxxf86vm-dev
 
       - name: Setup NDK
         uses: nttld/setup-ndk@v1
@@ -268,10 +343,8 @@ jobs:
         if: inputs.upload_to_r2
         run: |
           for variant in release debug; do
-            aws s3 cp \
-              "output/filament-${{ env.FILAMENT_VERSION }}-android-${variant}.zip" \
-              "s3://${{ env.R2_BUCKET_NAME }}/filament-${{ env.FILAMENT_VERSION }}-android-${variant}.zip" \
-              --endpoint-url "${{ env.R2_ENDPOINT }}"
+            bash scripts/upload_filament_hashed.sh \
+              "output/filament-${{ env.FILAMENT_VERSION }}-android-${variant}.zip"
           done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -314,16 +387,33 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates wget ninja-build \
-            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
-            libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxxf86vm-dev
+          set -euo pipefail
+          # apt can stall for hours on runner-network DNS blackholes
+          # (azure.archive.ubuntu.com); cap each command and retry the batch.
+          retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i/3 failed: $*" >&2; sleep 20; done; return 1; }
+          retry sudo apt-get update -o Acquire::http::Timeout=30 -o Acquire::Retries=3
+          # Base X11 + Mesa for Filament's own OpenGL/Vulkan paths.
+          # The libxcb-* set is for Dawn's X11/XCB backend (DAWN_USE_X11)
+          # — Dawn pulls in dri3, present, randr, sync, shape, xfixes,
+          # shm-fence and friends. Adding them all up front to avoid the
+          # one-at-a-time CI ping-pong.
+          retry sudo apt-get install -y -o Acquire::http::Timeout=30 \
+            ca-certificates wget ninja-build \
+            libx11-dev libx11-xcb-dev \
+            libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
+            libxxf86vm-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libxcb1-dev libxcb-dri3-dev libxcb-present-dev \
+            libxcb-randr0-dev libxcb-sync-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb-image0-dev libxcb-render0-dev \
+            libxcb-keysyms1-dev libxcb-util-dev libxcb-xkb-dev \
+            libxshmfence-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libgbm-dev
           # clang-18 + libc++ 18 from apt.llvm.org (jammy's distro clang is
           # 14, too old for Filament). See the runs-on comment above.
-          wget -q https://apt.llvm.org/llvm.sh
+          retry wget -q --tries=3 --timeout=30 https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          retry sudo apt-get install -y -o Acquire::http::Timeout=30 libc++-18-dev libc++abi-18-dev
           # build_linux.sh hardcodes CC=clang/CXX=clang++ and apt.llvm.org
           # only installs versioned binaries, so point the unversioned names
           # at clang-18.
@@ -331,11 +421,23 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 200
           clang --version
 
+      - name: Compute zip suffix
+        run: |
+          if [ "${{ inputs.webgpu }}" = "true" ]; then
+            echo "ZIP_SUFFIX=-webgpu" >> $GITHUB_ENV
+          else
+            echo "ZIP_SUFFIX=" >> $GITHUB_ENV
+          fi
+
       - name: Build Filament
         run: |
           mkdir -p output
           chmod +x scripts/build_linux.sh
-          scripts/build_linux.sh filament ${{ env.FILAMENT_VERSION }} output --clean
+          EXTRA_FLAGS=""
+          if [ "${{ inputs.webgpu }}" = "true" ]; then
+            EXTRA_FLAGS="--webgpu"
+          fi
+          scripts/build_linux.sh filament ${{ env.FILAMENT_VERSION }} output --clean $EXTRA_FLAGS
 
       - name: Reject glibc symbol references newer than 2.35
         # Guards the glibc baseline described in the runs-on comment above:
@@ -391,25 +493,26 @@ jobs:
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: filament-linux-release
-          path: output/filament-${{ env.FILAMENT_VERSION }}-linux-release.zip
+          name: filament-linux-release${{ env.ZIP_SUFFIX }}
+          path: output/filament-${{ env.FILAMENT_VERSION }}-linux-release${{ env.ZIP_SUFFIX }}.zip
           retention-days: 7
 
       - name: Upload debug artifact
         uses: actions/upload-artifact@v4
         with:
-          name: filament-linux-debug
-          path: output/filament-${{ env.FILAMENT_VERSION }}-linux-debug.zip
+          name: filament-linux-debug${{ env.ZIP_SUFFIX }}
+          path: output/filament-${{ env.FILAMENT_VERSION }}-linux-debug${{ env.ZIP_SUFFIX }}.zip
           retention-days: 7
 
       - name: Upload to R2
         if: inputs.upload_to_r2
         run: |
           for variant in release debug; do
-            aws s3 cp \
-              "output/filament-${{ env.FILAMENT_VERSION }}-linux-${variant}.zip" \
-              "s3://${{ env.R2_BUCKET_NAME }}/filament-${{ env.FILAMENT_VERSION }}-linux-${variant}.zip" \
-              --endpoint-url "${{ env.R2_ENDPOINT }}"
+            # Content-addressed keys for every artifact, including the
+            # -webgpu suffixed zips (record them into the pin via
+            # publish-filament-to-r2.yml, same as the canonical ones).
+            bash scripts/upload_filament_hashed.sh \
+              "output/filament-${{ env.FILAMENT_VERSION }}-linux-${variant}${{ env.ZIP_SUFFIX }}.zip"
           done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -444,16 +547,22 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates wget ninja-build \
-            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev \
-            libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxxf86vm-dev
+          set -euo pipefail
+          # apt can stall for hours on runner-network DNS blackholes
+          # (azure.archive.ubuntu.com); cap each command and retry the batch.
+          retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i/3 failed: $*" >&2; sleep 20; done; return 1; }
+          retry sudo apt-get update -o Acquire::http::Timeout=30 -o Acquire::Retries=3
+          retry sudo apt-get install -y -o Acquire::http::Timeout=30 \
+            ca-certificates wget ninja-build \
+            libx11-dev libx11-xcb-dev libxcursor-dev libxrandr-dev libxinerama-dev \
+            libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxxf86vm-dev \
+            libgbm-dev
           # clang-18 + libc++ 18 from apt.llvm.org (jammy's distro clang is
           # 14, too old for Filament). See the runs-on comment above.
-          wget -q https://apt.llvm.org/llvm.sh
+          retry wget -q --tries=3 --timeout=30 https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          retry sudo apt-get install -y -o Acquire::http::Timeout=30 libc++-18-dev libc++abi-18-dev
           # build_linux.sh hardcodes CC=clang/CXX=clang++ and apt.llvm.org
           # only installs versioned binaries, so point the unversioned names
           # at clang-18.
@@ -536,10 +645,8 @@ jobs:
         if: inputs.upload_to_r2
         run: |
           for variant in release debug; do
-            aws s3 cp \
-              "output/filament-${{ env.FILAMENT_VERSION }}-linux-arm64-${variant}.zip" \
-              "s3://${{ env.R2_BUCKET_NAME }}/filament-${{ env.FILAMENT_VERSION }}-linux-arm64-${variant}.zip" \
-              --endpoint-url "${{ env.R2_ENDPOINT }}"
+            bash scripts/upload_filament_hashed.sh \
+              "output/filament-${{ env.FILAMENT_VERSION }}-linux-arm64-${variant}.zip"
           done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -596,6 +703,9 @@ jobs:
             exit 1
           fi
 
+      - name: Verify packaged Windows shader tools
+        run: python scripts/verify-material-host-tools.py "output/filament-${{ env.FILAMENT_VERSION }}-windows-release.zip"
+
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
@@ -616,10 +726,8 @@ jobs:
         run: |
           pip install awscli
           for variant in release debug; do
-            aws s3 cp \
-              "output/filament-${{ env.FILAMENT_VERSION }}-windows-${variant}.zip" \
-              "s3://${{ env.R2_BUCKET_NAME }}/filament-${{ env.FILAMENT_VERSION }}-windows-${variant}.zip" \
-              --endpoint-url "${{ env.R2_ENDPOINT }}"
+            bash scripts/upload_filament_hashed.sh \
+              "output/filament-${{ env.FILAMENT_VERSION }}-windows-${variant}.zip"
           done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -630,7 +738,7 @@ jobs:
     name: Build Web
     runs-on: ubuntu-24.04
     needs: setup
-    if: contains(needs.setup.outputs.matrix, 'web')
+    if: contains(needs.setup.outputs.matrix, 'web') && inputs.webgpu_filament_run == ''
     env:
       FILAMENT_VERSION: ${{ needs.setup.outputs.filament_version }}
       FILAMENT_REPO: ${{ needs.setup.outputs.filament_repo }}
@@ -643,25 +751,60 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libc++-dev libc++abi-dev ninja-build libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxxf86vm-dev
+          set -euo pipefail
+          # apt can stall for hours on runner-network DNS blackholes
+          # (azure.archive.ubuntu.com); cap each command and retry the batch.
+          retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i/3 failed: $*" >&2; sleep 20; done; return 1; }
+          retry sudo apt-get update -o Acquire::http::Timeout=30 -o Acquire::Retries=3
+          retry sudo apt-get install -y -o Acquire::http::Timeout=30 clang libc++-dev libc++abi-dev ninja-build libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxxf86vm-dev
+          retry sudo apt-get install -y -o Acquire::http::Timeout=30 \
+            libx11-xcb-dev libxcb1-dev libxcb-dri3-dev libxcb-present-dev \
+            libxcb-randr0-dev libxcb-sync-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcb-image0-dev libxcb-render0-dev libxcb-keysyms1-dev libxcb-util-dev \
+            libxcb-xkb-dev libxshmfence-dev libxkbcommon-dev libxkbcommon-x11-dev libgbm-dev
 
       - name: Setup Emscripten
         uses: mymindstorm/setup-emsdk@v14
         with:
           version: '6.0.4'
 
+      - name: Reuse pinned host tools for upstream WebGPU builds
+        if: inputs.filament_repo == '' && inputs.filament_version == ''
+        run: |
+          set -euo pipefail
+          if [ "$FILAMENT_REPO" != https://github.com/google/filament ]; then exit 0; fi
+          tools="$RUNNER_TEMP/webgpu-host-tools"
+          official="$RUNNER_TEMP/filament-desktop.tgz"
+          pinned="$RUNNER_TEMP/filament-pinned-linux.zip"
+          release="https://github.com/google/filament/releases/download/$FILAMENT_VERSION/filament-$FILAMENT_VERSION-linux.tgz"
+          sha=$(python3 -c 'import json; print(json.load(open("thermion_dart/filament.libs.json")).get("linux/release", ""))')
+          mkdir -p "$tools"
+          # The pinned matc supports WGSL. The other tools come from the same upstream release.
+          if [ -n "$sha" ] &&
+             curl -fLsS --retry 2 "$release" -o "$official" &&
+             tar -xzf "$official" -C "$tools" --strip-components=1 filament/bin &&
+             curl -fLsS --retry 2 "$(python3 scripts/filament-artifact-url.py linux release)" -o "$pinned" &&
+             printf '%s  %s\n' "$sha" "$pinned" | sha256sum --check --status &&
+             unzip -oq "$pinned" bin/matc bin/resgen -d "$tools"; then
+            echo "WEBGPU_HOST_TOOLS=$tools" >> "$GITHUB_ENV"
+          else
+            echo "Matching downloads unavailable. Building the WebGPU host tools from source."
+          fi
+
       - name: Build Filament
         run: |
+          set -euo pipefail
           mkdir -p output
-          chmod +x scripts/build_web.sh
-          scripts/build_web.sh filament ${{ env.FILAMENT_VERSION }} output --clean
+          args=()
+          if [ -n "${WEBGPU_HOST_TOOLS:-}" ]; then args+=(--tools-dir "$WEBGPU_HOST_TOOLS"); fi
+          scripts/build_web.sh filament "$FILAMENT_VERSION" output --clean "${args[@]}"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: filament-web-release
           path: output/filament-${{ env.FILAMENT_VERSION }}-web-release.zip
+          if-no-files-found: error
           retention-days: 7
 
       - name: Upload debug artifact
@@ -669,18 +812,163 @@ jobs:
         with:
           name: filament-web-debug
           path: output/filament-${{ env.FILAMENT_VERSION }}-web-debug.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload WebGPU release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: filament-web-release-webgpu
+          path: output/filament-${{ env.FILAMENT_VERSION }}-web-release-webgpu.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload WebGPU debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: filament-web-debug-webgpu
+          path: output/filament-${{ env.FILAMENT_VERSION }}-web-debug-webgpu.zip
+          if-no-files-found: error
           retention-days: 7
 
       - name: Upload to R2
         if: inputs.upload_to_r2
         run: |
-          for variant in release debug; do
-            aws s3 cp \
-              "output/filament-${{ env.FILAMENT_VERSION }}-web-${variant}.zip" \
-              "s3://${{ env.R2_BUCKET_NAME }}/filament-${{ env.FILAMENT_VERSION }}-web-${variant}.zip" \
-              --endpoint-url "${{ env.R2_ENDPOINT }}"
+          set -euo pipefail
+          for variant in release debug release-webgpu debug-webgpu; do
+            bash scripts/upload_filament_hashed.sh "output/filament-$FILAMENT_VERSION-web-$variant.zip"
           done
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
+
+  build-webgpu-engine:
+    name: Build WebGPU engine
+    needs: [setup, build-web]
+    if: >-
+      !cancelled() && needs.setup.result == 'success' &&
+      (needs.build-web.result == 'success' || inputs.webgpu_filament_run != '') &&
+      inputs.platform == 'web' && inputs.filament_repo == '' && inputs.filament_version == ''
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    env:
+      FILAMENT_VERSION: ${{ needs.setup.outputs.filament_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: filament-web-release-webgpu
+          path: filament-webgpu
+          run-id: ${{ inputs.webgpu_filament_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: '6.0.4'
+          actions-cache-folder: emsdk-cache
+
+      - name: Install libraries and build the engine
+        run: |
+          set -euo pipefail
+          web=thermion_dart/native/web
+          mkdir -p "$web/lib/release"
+          unzip -q "filament-webgpu/filament-$FILAMENT_VERSION-web-release-webgpu.zip" -d "$web/lib/release"
+          emcmake cmake -S "$web" -B "$web/build-webgpu" -DCMAKE_BUILD_TYPE=Release \
+            -DTHERMION_ENABLE_WEBGPU=ON
+          cmake --build "$web/build-webgpu" --parallel 2
+
+      - name: Package engine archive
+        id: package
+        run: |
+          set -euo pipefail
+          web=thermion_dart/native/web
+          version=$(cat "$web/web.version")
+          # Reuse the public version when only the pointer or unrelated files
+          # changed after its build. A candidate gets its own commit ID.
+          if ! git cat-file -e "$version^{commit}" 2>/dev/null || \
+             ! git diff --quiet "$version" -- filament.version thermion_dart/filament.libs.json \
+                  thermion_dart/native thermion_dart/lib/src/bindings ":(exclude)$web/web.version"; then
+            version=$(git rev-parse --short HEAD)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p webgpu-engines
+          engine_dir="$web/build-webgpu/build/out"
+          zip -j "webgpu-engines/thermion_dart-$version-web-webgpu.zip" \
+            "$engine_dir/thermion_dart.js" "$engine_dir/thermion_dart.wasm"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thermion-webgpu-engines
+          path: webgpu-engines/
+
+  verify-webgpu-engine:
+    name: Verify and publish the WebGPU engine
+    needs: build-webgpu-engine
+    # Reusing an archive skips Build Web, an indirect dependency of this job.
+    if: ${{ !cancelled() && needs.build-webgpu-engine.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+    # Linux Chromium's software compositor cannot present the WebGPU canvas.
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      WEB_ENGINE_VERSION: ${{ needs.build-webgpu-engine.outputs.version }}
+      CHROME_EXECUTABLE: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: thermion-webgpu-engines
+          path: webgpu-engines
+      - uses: dart-lang/setup-dart@v1
+
+      - name: Compile the browser scene
+        working-directory: thermion_dart
+        run: |
+          dart pub get
+          mkdir -p "$RUNNER_TEMP/webgpu-scene"
+          # Same scene CI runs as a package:test browser suite
+          # (run-dart-tests.yml, "Dart Tests (web, chrome, webgpu scene)"):
+          # the harness hosts the suite's main() and POSTs the result to
+          # scripts/check-webgpu-canvas.py.
+          dart compile js tool/webgpu_scene_harness.dart -o "$RUNNER_TEMP/webgpu-scene/app.js"
+
+      - name: Render a WebGPU scene from the staged archive
+        run: |
+          set -euo pipefail
+          unzip -o "webgpu-engines/thermion_dart-$WEB_ENGINE_VERSION-web-webgpu.zip" -d "$RUNNER_TEMP/webgpu-scene"
+          python3 scripts/check-webgpu-canvas.py "$RUNNER_TEMP/webgpu-scene" --chrome "$CHROME_EXECUTABLE"
+
+      - name: Publish and verify the public archives
+        if: inputs.upload_to_r2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          # Both WebGPU selectors use the same main-thread engine.
+          archive="webgpu-engines/thermion_dart-$WEB_ENGINE_VERSION-web-webgpu.zip"
+          for suffix in webgpu main-thread-webgpu; do
+            artifact="thermion_dart-$WEB_ENGINE_VERSION-web-$suffix.zip"
+            aws s3 cp "$archive" "s3://thermion/$artifact" --endpoint-url "$R2_ENDPOINT"
+            curl -fL --retry 3 "$R2_PUBLIC_URL/$artifact" -o "$RUNNER_TEMP/published-webgpu.zip"
+            cmp "$archive" "$RUNNER_TEMP/published-webgpu.zip"
+          done
+
+      - name: Render from the published R2 archive
+        if: inputs.upload_to_r2
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 "$R2_PUBLIC_URL/thermion_dart-$WEB_ENGINE_VERSION-web-webgpu.zip" \
+            -o "$RUNNER_TEMP/published-webgpu.zip"
+          unzip -o "$RUNNER_TEMP/published-webgpu.zip" -d "$RUNNER_TEMP/webgpu-scene"
+          python3 scripts/check-webgpu-canvas.py "$RUNNER_TEMP/webgpu-scene" --chrome "$CHROME_EXECUTABLE"

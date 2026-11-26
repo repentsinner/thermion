@@ -8,6 +8,28 @@ extern "C"
 {
 #endif
 
+	// Stable IDs used by the Dart and native material factory.
+	typedef enum TBuiltInMaterial {
+	    BUILT_IN_IMAGE = 1,
+	    BUILT_IN_GRID = 2,
+	    BUILT_IN_GIZMO = 3,
+	    BUILT_IN_TRANSLATION_AXIS = 4,
+	    BUILT_IN_BONE_OVERLAY = 5,
+	    BUILT_IN_SILHOUETTE = 6,
+	    BUILT_IN_EDGE_OUTLINE = 7,
+	    BUILT_IN_WIREFRAME = 8,
+	    BUILT_IN_NORMAL_COLOR = 9,
+	    BUILT_IN_SHARP_EDGE = 10,
+	    BUILT_IN_CAPTURE_UV = 11,
+	    BUILT_IN_LINEAR_DEPTH = 12,
+	    BUILT_IN_UNLIT_FIXED_SIZE = 13,
+	    // Not user-selectable through `materials.*`: the hook compiles and links
+	    // it only for features.gltf: false builds (UNLIT_FALLBACK_ENABLED), where
+	    // Dart's createUnlitMaterialInstance builds it through
+	    // Material_createBuiltIn instead of the gltfio ubershader provider.
+	    BUILT_IN_UNLIT_FALLBACK = 14,
+	} TBuiltInMaterial;
+
 	// copied from SamplerCompareFunc in DriverEnums.h
 	enum TSamplerCompareFunc
 	{
@@ -84,6 +106,27 @@ extern "C"
 	};
 	typedef enum TBlendingMode TBlendingMode;
 
+	// copied from CompilerPriorityQueue in backend/DriverEnums.h
+	typedef enum TCompilerPriorityQueue {
+		COMPILER_PRIORITY_CRITICAL = 0, //!< We need this program NOW (compiled synchronously where the platform cannot compile in parallel)
+		COMPILER_PRIORITY_HIGH = 1, //!< We will need this program soon
+		COMPILER_PRIORITY_LOW = 2 //!< We will need this program eventually
+	} TCompilerPriorityQueue;
+
+	// Bits of UserVariantFilterBit in filament/MaterialEnums.h. The variants
+	// argument of Material_compile is a bitwise OR of these values.
+	typedef enum TUserVariantFilterBit {
+		USER_VARIANT_DIRECTIONAL_LIGHTING = 0x01,
+		USER_VARIANT_DYNAMIC_LIGHTING = 0x02,
+		USER_VARIANT_SHADOW_RECEIVER = 0x04,
+		USER_VARIANT_SKINNING = 0x08,
+		USER_VARIANT_FOG = 0x10,
+		USER_VARIANT_VSM = 0x20,
+		USER_VARIANT_SSR = 0x40,
+		USER_VARIANT_STE = 0x80,
+		USER_VARIANT_ALL = 0xFF,
+	} TUserVariantFilterBit;
+
 	EMSCRIPTEN_KEEPALIVE TMaterialInstance *Material_createInstance(TMaterial *tMaterial);
 	EMSCRIPTEN_KEEPALIVE TFeatureLevel Material_getFeatureLevel(TMaterial *tMaterial);
 	EMSCRIPTEN_KEEPALIVE TMaterial *Material_createImageMaterial(TEngine *tEngine);
@@ -155,6 +198,26 @@ extern "C"
 
 	EMSCRIPTEN_KEEPALIVE TBlendingMode Material_getBlendingMode(TMaterial *material);
 
+	// Asynchronously compiles the shaders of [variants] (a TUserVariantFilterBit
+	// mask; variants the material does not support are ignored) at [priority],
+	// so later renders do not stall on shader compilation. Returns false, and
+	// never calls onComplete, only when tMaterial is null. Otherwise onComplete
+	// is invoked exactly once after every requested variant is compiled, or
+	// when the engine is destroyed first, possibly from a Filament-internal
+	// thread and not inside this call. Filament recommends flushing the engine
+	// right after issuing compile requests so the work starts immediately.
+	EMSCRIPTEN_KEEPALIVE bool Material_compile(
+		TMaterial *tMaterial,
+		TCompilerPriorityQueue priority,
+		uint32_t variants,
+		void (*onComplete)(void *userData),
+		void *userData);
+
 #ifdef __cplusplus
+}
+
+namespace thermion {
+    using BuiltInMaterialFactory = TMaterial* (*)(TEngine*);
+    BuiltInMaterialFactory builtInMaterialFactory(TBuiltInMaterial id);
 }
 #endif
